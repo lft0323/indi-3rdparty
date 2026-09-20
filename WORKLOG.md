@@ -112,3 +112,17 @@
 - 验证结果：
   - `indi_qhy_ccd` 重新编译成功，仅有既有的 libindi deprecated 警告。
   - 程序已安装到 `/usr/bin/indi_qhy_ccd`，`quarcs-client.service` 重启后状态为 active。
+
+## 2026-09-20
+- 修改目标：同步板端正式版 V4L2/QHY 相机驱动代码。
+- 修改文件：
+  - indi-qhy/indi_qhy_v4l2.cpp
+  - indi-qhy/indi_qhy_v4l2.h
+  - WORKLOG.md
+- 修改原因与内容：
+  - 将板端已经验证的通用 V4L2 相机发现、设备树命名与角色解析、动态 video/subdev 节点匹配、格式元数据、曝光/增益/偏移量范围查询以及多相机实例化实现同步到仓库正式源码。
+  - 不提交 `.orig`、`backup`、`bak` 等备份文件，也不纳入与本次功能无关的根目录 CMake 差异。
+- 影响范围：
+  - 影响 indi-qhy 中的 V4L2 相机识别、实例化、图像格式和控制参数；原生 QHY SDK 相机代码未修改。
+- 验证结果：
+  - 已完成板端与仓库版本差异核对，待提交并推送到远端仓库。

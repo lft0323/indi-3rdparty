@@ -28,12 +28,20 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <fcntl.h>
 #include <eventloop.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <limits.h>
+#include <map>
+#include <queue>
+#include <set>
 #ifdef __linux__
 #include <dirent.h>
+#include <linux/media.h>
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/select.h>
+#include <sys/sysmacros.h>
 #endif
 
 #include "indi_qhy_v4l2.h"
@@ -69,7 +77,393 @@ ParentDeathGuard parentDeathGuard;
 }
 #endif
 
+#ifdef __linux__
+namespace
+{
+struct V4L2CameraDescriptor
+{
+    std::string name;
+    std::string videoNode;
+    std::string subdevNode;
+    std::string role;
+    double pixelSize = 0.0;
+};
+
+struct V4L2FormatInfo
+{
+    int bitDepth = 8;
+    bool bayer = false;
+    const char *cfa = nullptr;
+};
+
+V4L2FormatInfo describeV4L2Format(uint32_t fourcc)
+{
+    switch (fourcc)
+    {
+        case v4l2_fourcc('R', 'G', '1', '2'):
+            return {12, true, "SRGGB"};
+        case v4l2_fourcc('B', 'A', '1', '2'):
+            return {12, true, "SBGGR"};
+        case v4l2_fourcc('G', 'B', '1', '2'):
+            return {12, true, "SGBRG"};
+        case v4l2_fourcc('B', 'G', '1', '2'):
+            return {12, true, "SGRBG"};
+        case v4l2_fourcc('R', 'G', '1', '0'):
+            return {10, true, "SRGGB"};
+        case v4l2_fourcc('B', 'A', '1', '0'):
+            return {10, true, "SBGGR"};
+        case v4l2_fourcc('G', 'B', '1', '0'):
+            return {10, true, "SGBRG"};
+        case v4l2_fourcc('B', 'G', '1', '0'):
+            return {10, true, "SGRBG"};
+        case v4l2_fourcc('R', 'G', '1', '4'):
+            return {14, true, "SRGGB"};
+        case v4l2_fourcc('B', 'A', '1', '4'):
+            return {14, true, "SBGGR"};
+        case v4l2_fourcc('G', 'B', '1', '4'):
+            return {14, true, "SGBRG"};
+        case v4l2_fourcc('B', 'G', '1', '4'):
+            return {14, true, "SGRBG"};
+        case v4l2_fourcc('R', 'G', '1', '6'):
+            return {16, true, "SRGGB"};
+        case v4l2_fourcc('B', 'A', '1', '6'):
+            return {16, true, "SBGGR"};
+        case v4l2_fourcc('G', 'B', '1', '6'):
+            return {16, true, "SGBRG"};
+        case v4l2_fourcc('B', 'G', '1', '6'):
+            return {16, true, "SGRBG"};
+        case v4l2_fourcc('Y', '1', '0', ' '):
+            return {10, false, nullptr};
+        case v4l2_fourcc('Y', '1', '2', ' '):
+            return {12, false, nullptr};
+        case v4l2_fourcc('Y', '1', '4', ' '):
+            return {14, false, nullptr};
+        case V4L2_PIX_FMT_Y16:
+            return {16, false, nullptr};
+        case V4L2_PIX_FMT_RGB24:
+        case V4L2_PIX_FMT_YUYV:
+            return {8, false, nullptr};
+        default:
+            return {};
+    }
+}
+
+double readDeviceTreePixelSize(const std::string &path)
+{
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+        return 0.0;
+
+    unsigned char buffer[64] {};
+    const ssize_t bytes = read(fd, buffer, sizeof(buffer));
+    close(fd);
+    if (bytes <= 0)
+        return 0.0;
+
+    const std::string text(reinterpret_cast<const char *>(buffer),
+                           strnlen(reinterpret_cast<const char *>(buffer), static_cast<size_t>(bytes)));
+    char *end = nullptr;
+    const double parsed = std::strtod(text.c_str(), &end);
+    if (end != text.c_str() && parsed > 0.0)
+        return parsed > 100.0 ? parsed / 1000.0 : parsed;
+
+    if (bytes == 4)
+    {
+        const uint32_t raw = (static_cast<uint32_t>(buffer[0]) << 24) |
+                             (static_cast<uint32_t>(buffer[1]) << 16) |
+                             (static_cast<uint32_t>(buffer[2]) << 8) |
+                             static_cast<uint32_t>(buffer[3]);
+        if (raw > 0)
+            return raw / 1000.0;
+    }
+    return 0.0;
+}
+
+std::string readDeviceTreeString(const std::string &path)
+{
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+        return {};
+
+    char buffer[256] {};
+    const ssize_t bytes = read(fd, buffer, sizeof(buffer) - 1);
+    close(fd);
+    return bytes > 0 ? std::string(buffer, strnlen(buffer, static_cast<size_t>(bytes))) : std::string {};
+}
+
+bool hasPrefix(const char *value, const char *prefix)
+{
+    return strncmp(value, prefix, strlen(prefix)) == 0;
+}
+
+std::string findSensorSubdev(const std::string &i2cDevice)
+{
+    DIR *dir = opendir("/sys/class/video4linux");
+    if (!dir)
+        return {};
+
+    std::string result;
+    const std::string suffix = "/" + i2cDevice;
+    while (const dirent *entry = readdir(dir))
+    {
+        if (!hasPrefix(entry->d_name, "v4l-subdev"))
+            continue;
+
+        const std::string link = std::string("/sys/class/video4linux/") + entry->d_name + "/device";
+        char target[PATH_MAX] {};
+        const ssize_t length = readlink(link.c_str(), target, sizeof(target) - 1);
+        if (length <= 0)
+            continue;
+
+        const std::string resolved(target, static_cast<size_t>(length));
+        if (resolved.size() >= suffix.size() && resolved.compare(resolved.size() - suffix.size(), suffix.size(), suffix) == 0)
+        {
+            result = std::string("/dev/") + entry->d_name;
+            break;
+        }
+    }
+    closedir(dir);
+    return result;
+}
+
+std::map<std::pair<unsigned int, unsigned int>, std::string> enumerateVideoNodes()
+{
+    std::map<std::pair<unsigned int, unsigned int>, std::string> nodes;
+    DIR *dir = opendir("/dev");
+    if (!dir)
+        return nodes;
+
+    while (const dirent *entry = readdir(dir))
+    {
+        if (!hasPrefix(entry->d_name, "video"))
+            continue;
+
+        const char *number = entry->d_name + strlen("video");
+        if (*number == '\0' || strspn(number, "0123456789") != strlen(number))
+            continue;
+
+        const std::string path = std::string("/dev/") + entry->d_name;
+        struct stat st {};
+        if (stat(path.c_str(), &st) == 0 && S_ISCHR(st.st_mode))
+            nodes[{ major(st.st_rdev), minor(st.st_rdev) }] = path;
+    }
+    closedir(dir);
+    return nodes;
+}
+
+long long captureNodeScore(const std::string &path)
+{
+    const int fd = open(path.c_str(), O_RDWR | O_NONBLOCK, 0);
+    if (fd < 0)
+        return -1;
+
+    long long score = -1;
+    struct v4l2_capability cap {};
+    if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0)
+    {
+        const unsigned int devCaps = (cap.capabilities & V4L2_CAP_DEVICE_CAPS) ? cap.device_caps : cap.capabilities;
+        const bool capture = (devCaps & V4L2_CAP_VIDEO_CAPTURE) || (devCaps & V4L2_CAP_VIDEO_CAPTURE_MPLANE);
+        if (capture && (devCaps & V4L2_CAP_STREAMING))
+        {
+            struct v4l2_format fmt {};
+            fmt.type = (devCaps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            if (ioctl(fd, VIDIOC_G_FMT, &fmt) == 0)
+            {
+                const unsigned int width = (fmt.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ? fmt.fmt.pix_mp.width : fmt.fmt.pix.width;
+                const unsigned int height = (fmt.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ? fmt.fmt.pix_mp.height : fmt.fmt.pix.height;
+                if (width > 0 && height > 0)
+                {
+                    const uint32_t fourcc = (fmt.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ?
+                                             fmt.fmt.pix_mp.pixelformat : fmt.fmt.pix.pixelformat;
+                    score = static_cast<long long>(width) * height;
+                    if (describeV4L2Format(fourcc).bitDepth >= 10)
+                        score += (1LL << 50);
+                }
+            }
+        }
+    }
+    close(fd);
+    return score;
+}
+
+std::string findSensorVideoNode(const std::string &i2cDevice,
+                                const std::map<std::pair<unsigned int, unsigned int>, std::string> &videoNodes)
+{
+    DIR *dir = opendir("/dev");
+    if (!dir)
+        return {};
+
+    std::vector<std::string> mediaNodes;
+    while (const dirent *entry = readdir(dir))
+    {
+        if (hasPrefix(entry->d_name, "media"))
+            mediaNodes.emplace_back(std::string("/dev/") + entry->d_name);
+    }
+    closedir(dir);
+    std::sort(mediaNodes.begin(), mediaNodes.end());
+
+    for (const auto &mediaNode : mediaNodes)
+    {
+        const int fd = open(mediaNode.c_str(), O_RDONLY);
+        if (fd < 0)
+            continue;
+
+        std::map<uint32_t, media_entity_desc> entities;
+        media_entity_desc entity {};
+        entity.id = MEDIA_ENT_ID_FLAG_NEXT;
+        while (ioctl(fd, MEDIA_IOC_ENUM_ENTITIES, &entity) == 0)
+        {
+            entities[entity.id] = entity;
+            entity.id |= MEDIA_ENT_ID_FLAG_NEXT;
+        }
+
+        uint32_t sensorId = 0;
+        for (const auto &[id, desc] : entities)
+        {
+            if (std::string(desc.name).find(i2cDevice) != std::string::npos)
+            {
+                sensorId = id;
+                break;
+            }
+        }
+        if (sensorId == 0)
+        {
+            close(fd);
+            continue;
+        }
+
+        std::map<uint32_t, std::vector<uint32_t>> graph;
+        for (const auto &[id, desc] : entities)
+        {
+            std::vector<media_pad_desc> pads(desc.pads);
+            std::vector<media_link_desc> links(desc.links);
+            media_links_enum enumeration {};
+            enumeration.entity = id;
+            enumeration.pads = pads.data();
+            enumeration.links = links.data();
+            if (ioctl(fd, MEDIA_IOC_ENUM_LINKS, &enumeration) < 0)
+                continue;
+
+            for (const auto &link : links)
+            {
+                if (link.flags & MEDIA_LNK_FL_ENABLED)
+                    graph[link.source.entity].push_back(link.sink.entity);
+            }
+        }
+
+        std::queue<uint32_t> pending;
+        std::set<uint32_t> visited;
+        pending.push(sensorId);
+        visited.insert(sensorId);
+        std::string bestNode;
+        long long bestScore = -1;
+        while (!pending.empty())
+        {
+            const uint32_t id = pending.front();
+            pending.pop();
+            const auto descriptor = entities.find(id);
+            if (descriptor != entities.end())
+            {
+                const auto node = videoNodes.find({ descriptor->second.dev.major, descriptor->second.dev.minor });
+                if (node != videoNodes.end())
+                {
+                    const long long score = captureNodeScore(node->second);
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestNode = node->second;
+                    }
+                }
+            }
+
+            for (const uint32_t next : graph[id])
+            {
+                if (visited.insert(next).second)
+                    pending.push(next);
+            }
+        }
+        close(fd);
+        if (!bestNode.empty())
+            return bestNode;
+    }
+    return {};
+}
+
+std::string roleTitle(const std::string &role)
+{
+    if (role == "main")
+        return "Main";
+    if (role == "guide")
+        return "Guide";
+    return role;
+}
+
+std::vector<V4L2CameraDescriptor> discoverV4L2Cameras()
+{
+    std::vector<V4L2CameraDescriptor> cameras;
+    const auto videoNodes = enumerateVideoNodes();
+    DIR *dir = opendir("/sys/bus/i2c/devices");
+    if (!dir)
+        return cameras;
+
+    while (const dirent *entry = readdir(dir))
+    {
+        const std::string base = std::string("/sys/bus/i2c/devices/") + entry->d_name + "/of_node/";
+        const std::string role = readDeviceTreeString(base + "qhy,indi-role");
+
+        const std::string subdev = findSensorSubdev(entry->d_name);
+        const std::string video = findSensorVideoNode(entry->d_name, videoNodes);
+        if (subdev.empty() || video.empty())
+        {
+            fprintf(stderr, "QHY V4L2: skip sensor %s (role=%s): sensor pipeline is incomplete (video=%s, subdev=%s)\n",
+                    entry->d_name, role.empty() ? "unspecified" : role.c_str(), video.c_str(), subdev.c_str());
+            continue;
+        }
+
+        const std::string configuredName = readDeviceTreeString(base + "qhy,indi-name");
+        std::string deviceName = "QHY CCD " + (configuredName.empty() ? entry->d_name : configuredName);
+        if (!role.empty())
+            deviceName += " " + roleTitle(role);
+        else
+            deviceName += " Camera";
+
+        cameras.push_back({ deviceName,
+                            video, subdev, role,
+                            readDeviceTreePixelSize(base + "qhy,pixel-size-um") });
+    }
+    closedir(dir);
+    std::sort(cameras.begin(), cameras.end(), [](const auto &left, const auto &right)
+    {
+        return left.role < right.role;
+    });
+    return cameras;
+}
+
+class V4L2CameraLoader
+{
+public:
+    V4L2CameraLoader()
+    {
+        const auto cameras = discoverV4L2Cameras();
+        for (const auto &camera : cameras)
+        {
+            fprintf(stderr, "QHY V4L2: create %s (%s, %s)\n", camera.name.c_str(),
+                    camera.videoNode.c_str(), camera.subdevNode.c_str());
+            devices.emplace_back(std::make_unique<indi_qhy_v4l2>(camera.name, camera.videoNode,
+                                                                  camera.subdevNode, camera.role,
+                                                                  camera.pixelSize));
+        }
+    }
+
+private:
+    std::vector<std::unique_ptr<indi_qhy_v4l2>> devices;
+};
+
+V4L2CameraLoader qhyV4L2CameraLoader;
+}
+#else
 static std::unique_ptr<indi_qhy_v4l2> qhy_v4l2(new indi_qhy_v4l2());
+#endif
 
 //Note this is how we get information about AVFoundation Devices
 //FFMpeg does not provide a way to programmatically get them, but there is a way to log them.
@@ -178,7 +572,11 @@ void indi_qhy_v4l2::findAVFoundationVideoSources()
         StartStreaming();
 }
 
-indi_qhy_v4l2::indi_qhy_v4l2()
+indi_qhy_v4l2::indi_qhy_v4l2(const std::string &name, const std::string &videoPath,
+                             const std::string &subdevPath, const std::string &role,
+                             double discoveredPixelSize)
+    : defaultDeviceName(name), v4l2_role(role), pixelSize(discoveredPixelSize),
+      v4l2_subdev_path(subdevPath)
 {
     setVersion(QHY_V4L2_VERSION_MAJOR, QHY_V4L2_VERSION_MINOR);
 
@@ -209,7 +607,7 @@ indi_qhy_v4l2::indi_qhy_v4l2()
 
 #ifdef __linux__
     videoDevice = QHY_V4L2_DIRECT_DEVICE;
-    videoSource = "/dev/video11";
+    videoSource = videoPath;
     inputPixelFormat = "yuv420p";
 #elif __APPLE__
     videoDevice = "avfoundation";
@@ -221,7 +619,7 @@ indi_qhy_v4l2::indi_qhy_v4l2()
 #endif
 
     frameRate = 30;
-    videoSize = "1920x1080";
+    videoSize = "";
     webcamStacking = false;
     averaging = false;
     outputFormat = "8 bit RGB";
@@ -234,7 +632,8 @@ indi_qhy_v4l2::indi_qhy_v4l2()
 
     ffmpegTimeout = 1000000;
     bufferTimeout = 10000;
-    pixelSize = 5.0;
+    if (pixelSize < 0.0)
+        pixelSize = 0.0;
 
     //Creating the format context.
     pFormatCtx = nullptr;
@@ -282,9 +681,7 @@ bool indi_qhy_v4l2::ConnectToSource(std::string device, std::string source, int 
         if (!ConnectToSourceV4L2(source))
             return false;
 
-        int w = v4l2_fmt.fmt.pix.width;
-        int h = v4l2_fmt.fmt.pix.height;
-        SetCCDParams(w, h, 12, pixelSize, pixelSize);
+        updateV4L2ImageMetadata();
         DEBUG(INDI::Logger::DBG_SESSION, "Connection Successful (V4L2 Direct).");
         return true;
     }
@@ -554,7 +951,7 @@ bool indi_qhy_v4l2::Disconnect()
 ***************************************************************************************/
 const char * indi_qhy_v4l2::getDefaultName()
 {
-    return "QHY CCD QHY26800A_guide";
+    return defaultDeviceName.c_str();
 }
 /**************************************************************************************
 ** INDI is asking us to init our properties.
@@ -581,7 +978,8 @@ bool indi_qhy_v4l2::initProperties()
     IUFillNumber(&OffsetT[0], "OFFSET", "Offset", "%.0f", 
                  static_cast<double>(v4l2_subdev_offset_min), 
                  static_cast<double>(v4l2_subdev_offset_max), 
-                 1.0, static_cast<double>(v4l2_subdev_offset));
+                 static_cast<double>(v4l2_subdev_offset_step),
+                 static_cast<double>(v4l2_subdev_offset));
     IUFillNumberVector(&OffsetTP, OffsetT, 1, getDeviceName(), "CCD_OFFSET",
                        "Offset", IMAGE_SETTINGS_TAB, IP_RW, 60, IPS_IDLE);
 #endif
@@ -743,7 +1141,7 @@ bool indi_qhy_v4l2::initProperties()
     //Setting the log level
     av_log_set_level(AV_LOG_INFO);
 
-    // Set minimum exposure speed to 0.001 seconds
+    // Use the V4L2 sensor range when a direct V4L2 device is connected.
     PrimaryCCD.setMinMaxStep("CCD_EXPOSURE", "CCD_EXPOSURE_VALUE", 0.001, 3600, 1, false);
 
     /* Add debug controls so we may debug driver if necessary */
@@ -889,10 +1287,6 @@ bool indi_qhy_v4l2::refreshInputSources()
             closedir(dir);
             std::sort(v4l2_nodes.begin(), v4l2_nodes.end());
         }
-        if (v4l2_nodes.empty())
-        {
-            v4l2_nodes.push_back("/dev/video11");
-        }
         sourceNum = v4l2_nodes.size();
         CaptureSources = new ISwitch[sourceNum];
         for (int x = 0; x < sourceNum; x++)
@@ -1025,7 +1419,10 @@ bool indi_qhy_v4l2::updateProperties()
             OffsetT[0].value = static_cast<double>(v4l2_subdev_offset);
             
             defineProperty(&GainTP);
-            defineProperty(&OffsetTP);
+            if (v4l2_offset_supported)
+                defineProperty(&OffsetTP);
+            else
+                deleteProperty(OffsetTP.name);
             
             DEBUGF(INDI::Logger::DBG_SESSION, "Published Gain range: %d - %d, Offset range: %d - %d",
                    v4l2_subdev_gain_min, v4l2_subdev_gain_max, 
@@ -1537,18 +1934,25 @@ bool indi_qhy_v4l2::StartExposure(float duration)
         syncV4L2ExposureFromDuration(duration);
 
         uint32_t fourcc = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.pixelformat : v4l2_fmt.fmt.pix.pixelformat;
+        const auto info = describeV4L2Format(fourcc);
         if (fourcc == V4L2_PIX_FMT_RGB24 || fourcc == V4L2_PIX_FMT_YUYV)
         {
             PrimaryCCD.setBPP(8);
             PrimaryCCD.setNAxis(3);
             v4l2_force_16bit = false;
         }
-        else
+        else if (info.bitDepth >= 10)
         {
-            // Y12 / Bayer12 → prefer 16-bit FITS for single exposure
+            // RAW formats are delivered in a 16-bit container to INDI/FITS.
             PrimaryCCD.setBPP(16);
             PrimaryCCD.setNAxis(2);
             v4l2_force_16bit = true;
+        }
+        else
+        {
+            PrimaryCCD.setBPP(8);
+            PrimaryCCD.setNAxis(2);
+            v4l2_force_16bit = false;
         }
     }
     else
@@ -1615,6 +2019,8 @@ bool indi_qhy_v4l2::StartExposure(float duration)
             DEBUG(INDI::Logger::DBG_SESSION, "V4L2 stream started for exposure");
             // Wait a bit for stream to stabilize after starting
             usleep(100000); // 100ms
+            if (!discardInitialV4L2Frames(2))
+                LOG_WARN("V4L2 initial frame discard did not complete");
         }
         else
         {
@@ -2195,11 +2601,18 @@ void indi_qhy_v4l2::run_capture()
             return;
         // Decide pixel format based on device FOURCC
         uint32_t fourcc = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.pixelformat : v4l2_fmt.fmt.pix.pixelformat;
+        const auto info = describeV4L2Format(fourcc);
         if (fourcc == V4L2_PIX_FMT_RGB24)
         {
             PrimaryCCD.setBPP(8);
             PrimaryCCD.setNAxis(3);
             Streamer->setPixelFormat(INDI_RGB);
+        }
+        else if (info.bitDepth >= 10)
+        {
+            PrimaryCCD.setBPP(16);
+            PrimaryCCD.setNAxis(2);
+            Streamer->setPixelFormat(INDI_MONO);
         }
         else
         {
@@ -2603,9 +3016,7 @@ bool indi_qhy_v4l2::ConnectToSourceV4L2(std::string source)
             // Write "0 0 0 0" to disable compact mode
             if (fprintf(fp, "0 0 0 0") >= 0)
             {
-                fclose(fp);
                 DEBUGF(INDI::Logger::DBG_SESSION, "Disabled Rockchip CIF compact mode via %s", compact_test_paths[i]);
-                break; // Successfully disabled, no need to try other paths
             }
             fclose(fp);
         }
@@ -2649,9 +3060,11 @@ bool indi_qhy_v4l2::ConnectToSourceV4L2(std::string source)
         return false;
     }
 
-    // If user requested a size, try to set width/height only, keep current pixel format
+    // Re-submit the complete current format even when no size was configured.
+    // This reinitializes Rockchip CIF with the negotiated Bayer FOURCC (GB12 for IMX585).
     unsigned int reqw = 0, reqh = 0;
-    if (sscanf(videoSize.c_str(), "%ux%u", &reqw, &reqh) == 2 && reqw > 0 && reqh > 0)
+    const bool hasRequestedSize = sscanf(videoSize.c_str(), "%ux%u", &reqw, &reqh) == 2 && reqw > 0 && reqh > 0;
+    if (hasRequestedSize)
     {
         if (!v4l2_is_mplane)
         {
@@ -2666,11 +3079,41 @@ bool indi_qhy_v4l2::ConnectToSourceV4L2(std::string source)
             v4l2_fmt.fmt.pix_mp.plane_fmt[0].bytesperline = 0;
             v4l2_fmt.fmt.pix_mp.plane_fmt[0].sizeimage = 0;
         }
-        ioctl(v4l2_fd, VIDIOC_S_FMT, &v4l2_fmt); // best effort; ignore failure, we continue with current
-        // Re-read actual negotiated format
-        memset(&v4l2_fmt, 0, sizeof(v4l2_fmt));
-        v4l2_fmt.type = v4l2_is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        ioctl(v4l2_fd, VIDIOC_G_FMT, &v4l2_fmt);
+    }
+
+    unsigned int fmtWidth = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.width : v4l2_fmt.fmt.pix.width;
+    unsigned int fmtHeight = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.height : v4l2_fmt.fmt.pix.height;
+    DEBUGF(INDI::Logger::DBG_SESSION, "Applying V4L2 format %ux%u fourcc=0x%08x",
+           fmtWidth, fmtHeight,
+           v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.pixelformat : v4l2_fmt.fmt.pix.pixelformat);
+    if (ioctl(v4l2_fd, VIDIOC_S_FMT, &v4l2_fmt) < 0)
+    {
+        DEBUGF(INDI::Logger::DBG_SESSION, "VIDIOC_S_FMT failed for %ux%u: %s",
+               fmtWidth, fmtHeight, strerror(errno));
+        close(v4l2_fd);
+        v4l2_fd = -1;
+        return false;
+    }
+    // Re-read actual negotiated format
+    memset(&v4l2_fmt, 0, sizeof(v4l2_fmt));
+    v4l2_fmt.type = v4l2_is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(v4l2_fd, VIDIOC_G_FMT, &v4l2_fmt) < 0)
+    {
+        DEBUGF(INDI::Logger::DBG_SESSION, "VIDIOC_G_FMT failed after S_FMT: %s",
+               strerror(errno));
+        close(v4l2_fd);
+        v4l2_fd = -1;
+        return false;
+    }
+
+    const unsigned int negotiatedWidth = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.width : v4l2_fmt.fmt.pix.width;
+    const unsigned int negotiatedHeight = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.height : v4l2_fmt.fmt.pix.height;
+    if (negotiatedWidth > 0 && negotiatedHeight > 0)
+    {
+        char negotiatedSize[32] {};
+        snprintf(negotiatedSize, sizeof(negotiatedSize), "%ux%u", negotiatedWidth, negotiatedHeight);
+        videoSize = negotiatedSize;
+        IUSaveText(&InputOptionsT[4], videoSize.c_str());
     }
 
     struct v4l2_requestbuffers req = {};
@@ -2782,8 +3225,10 @@ bool indi_qhy_v4l2::ConnectToSourceV4L2(std::string source)
         
         // 初始化增益和偏移量
         updateV4L2GainRange();
-        setV4L2Gain(v4l2_subdev_gain);
-        setV4L2Offset(v4l2_subdev_offset);
+        getV4L2Gain(&v4l2_subdev_gain);
+        updateV4L2OffsetRange();
+        if (v4l2_offset_supported)
+            getV4L2Offset(&v4l2_subdev_offset);
     }
 #endif
 
@@ -2807,10 +3252,57 @@ bool indi_qhy_v4l2::DisconnectV4L2()
     closeV4L2Subdevice();
     use_v4l2_direct = false;
     //目前实现参数在断开重连时保留，如果需要重置参数，可以取消注释以下代码，同时也可以修改默认参数
-    // v4l2_subdev_exposure = 1000.0;
+    // v4l2_subdev_exposure = 10000.0;
     // v4l2_subdev_gain = 64;
     // v4l2_subdev_offset = 0;
     return true;
+}
+
+void indi_qhy_v4l2::updateV4L2ImageMetadata()
+{
+#ifdef __linux__
+    if (!use_v4l2_direct || v4l2_fd < 0)
+        return;
+
+    const uint32_t fourcc = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.pixelformat
+                                           : v4l2_fmt.fmt.pix.pixelformat;
+    const int width = v4l2_is_mplane ? static_cast<int>(v4l2_fmt.fmt.pix_mp.width)
+                                     : static_cast<int>(v4l2_fmt.fmt.pix.width);
+    const int height = v4l2_is_mplane ? static_cast<int>(v4l2_fmt.fmt.pix_mp.height)
+                                      : static_cast<int>(v4l2_fmt.fmt.pix.height);
+    const auto info = describeV4L2Format(fourcc);
+
+    SetCCDParams(width, height, info.bitDepth, pixelSize, pixelSize);
+
+    uint32_t cap = CCD_HAS_STREAMING | CCD_CAN_SUBFRAME | CCD_CAN_ABORT;
+    if (info.bayer)
+    {
+        cap |= CCD_HAS_BAYER;
+        int offsetX = 0;
+        int offsetY = 0;
+        struct v4l2_selection selection {};
+        selection.type = v4l2_is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                                          V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        selection.target = V4L2_SEL_TGT_CROP;
+        if (ioctl(v4l2_fd, VIDIOC_G_SELECTION, &selection) == 0)
+        {
+            offsetX = selection.r.left & 1;
+            offsetY = selection.r.top & 1;
+        }
+        BayerTP[CFA_OFFSET_X].setText(std::to_string(offsetX).c_str());
+        BayerTP[CFA_OFFSET_Y].setText(std::to_string(offsetY).c_str());
+        BayerTP[CFA_TYPE].setText(info.cfa);
+    }
+    SetCCDCapability(cap);
+
+    DEBUGF(INDI::Logger::DBG_SESSION,
+           "V4L2 metadata: %dx%d fourcc=%c%c%c%c bpp=%d bayer=%s cfa=%s pixel_size=%.3f",
+           width, height,
+           fourcc & 0xff, (fourcc >> 8) & 0xff,
+           (fourcc >> 16) & 0xff, (fourcc >> 24) & 0xff,
+           info.bitDepth, info.bayer ? "yes" : "no",
+           info.cfa ? info.cfa : "", pixelSize);
+#endif
 }
 
 bool indi_qhy_v4l2::setupV4L2Streaming()
@@ -2832,25 +3324,10 @@ bool indi_qhy_v4l2::setupV4L2Streaming()
     int w = v4l2_is_mplane ? (int)v4l2_fmt.fmt.pix_mp.width : (int)v4l2_fmt.fmt.pix.width;
     int h = v4l2_is_mplane ? (int)v4l2_fmt.fmt.pix_mp.height : (int)v4l2_fmt.fmt.pix.height;
     uint32_t fourcc = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.pixelformat : v4l2_fmt.fmt.pix.pixelformat;
-    bool is12bit = (fourcc == V4L2_PIX_FMT_Y12) ||
-#ifdef V4L2_PIX_FMT_SRGGB12
-                   (fourcc == V4L2_PIX_FMT_SRGGB12) ||
-#endif
-#ifdef V4L2_PIX_FMT_SGRBG12
-                   (fourcc == V4L2_PIX_FMT_SGRBG12) ||
-#endif
-#ifdef V4L2_PIX_FMT_SGBRG12
-                   (fourcc == V4L2_PIX_FMT_SGBRG12) ||
-#endif
-#ifdef V4L2_PIX_FMT_SBGGR12
-                   (fourcc == V4L2_PIX_FMT_SBGGR12) ||
-#endif
-                   (fourcc == v4l2_fourcc('R','G','1','2')) ||
-                   (fourcc == v4l2_fourcc('B','A','1','2')) ||
-                   (fourcc == v4l2_fourcc('G','B','1','2')) ||
-                   (fourcc == v4l2_fourcc('B','G','1','2'));
+    const auto info = describeV4L2Format(fourcc);
+    const bool isRaw = info.bitDepth >= 10;
 
-    if (v4l2_force_16bit && is12bit)
+    if (v4l2_force_16bit && isRaw)
         numBytes = w * h * 2;
     else if (fourcc == V4L2_PIX_FMT_RGB24)
         numBytes = w * h * 3;
@@ -2858,6 +3335,19 @@ bool indi_qhy_v4l2::setupV4L2Streaming()
         numBytes = w * h * 3; // we convert to RGB24 for streaming
     else
         numBytes = w * h;     // 8-bit mono fallback
+
+    if (isRaw)
+    {
+        const uint32_t bytesPerLine = v4l2_is_mplane ?
+            v4l2_fmt.fmt.pix_mp.plane_fmt[0].bytesperline : v4l2_fmt.fmt.pix.bytesperline;
+        if (bytesPerLine < static_cast<uint32_t>(w * 2))
+        {
+            DEBUGF(INDI::Logger::DBG_WARNING,
+                   "Packed RAW V4L2 format is not supported yet: bytesperline=%u, expected at least %d",
+                   bytesPerLine, w * 2);
+            return false;
+        }
+    }
     
     // Only allocate buffer if not already allocated or size changed
     if (!buffer || PrimaryCCD.getFrameBufferSize() != numBytes)
@@ -2946,23 +3436,7 @@ bool indi_qhy_v4l2::getStreamFrameV4L2()
             yuyv_to_rgb24_line(src + y * w * 2, dst + y * w * 3, w);
         numBytes = w * h * 3;
     }
-    else if (fourcc == V4L2_PIX_FMT_Y12
-#ifdef V4L2_PIX_FMT_SRGGB12
-             || fourcc == V4L2_PIX_FMT_SRGGB12
-#endif
-#ifdef V4L2_PIX_FMT_SGRBG12
-             || fourcc == V4L2_PIX_FMT_SGRBG12
-#endif
-#ifdef V4L2_PIX_FMT_SGBRG12
-             || fourcc == V4L2_PIX_FMT_SGBRG12
-#endif
-#ifdef V4L2_PIX_FMT_SBGGR12
-             || fourcc == V4L2_PIX_FMT_SBGGR12
-#endif
-             || fourcc == v4l2_fourcc('R','G','1','2')
-             || fourcc == v4l2_fourcc('B','A','1','2')
-             || fourcc == v4l2_fourcc('G','B','1','2')
-             || fourcc == v4l2_fourcc('B','G','1','2'))
+    else if (describeV4L2Format(fourcc).bitDepth >= 10)
     {
         if (v4l2_force_16bit)
         {
@@ -2994,7 +3468,7 @@ bool indi_qhy_v4l2::getStreamFrameV4L2()
             }
             else
             {
-                DEBUG(INDI::Logger::DBG_SESSION, "Raw 12-bit container smaller than expected");
+                DEBUG(INDI::Logger::DBG_SESSION, "RAW V4L2 container smaller than expected");
                 if (v4l2_is_mplane)
                 {
                     buf.m.planes = planes;
@@ -3026,7 +3500,7 @@ bool indi_qhy_v4l2::getStreamFrameV4L2()
             }
             else
             {
-                DEBUG(INDI::Logger::DBG_SESSION, "Unexpected Y12/Bayer12 buffer size");
+                DEBUG(INDI::Logger::DBG_SESSION, "Unexpected RAW V4L2 buffer size");
                 if (v4l2_is_mplane)
                 {
                     buf.m.planes = planes;
@@ -3122,6 +3596,65 @@ bool indi_qhy_v4l2::flush_frame_bufferV4L2()
     }
     if (cleared > 0)
         DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 Buffer Cleared of %u stale frames.", cleared);
+    return true;
+}
+
+bool indi_qhy_v4l2::discardInitialV4L2Frames(unsigned int count)
+{
+    if (v4l2_fd < 0 || !v4l2_streaming)
+        return false;
+
+    unsigned int discarded = 0;
+    while (discarded < count)
+    {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(v4l2_fd, &fds);
+        struct timeval tv = {1, 0};
+        int ready = select(v4l2_fd + 1, &fds, nullptr, nullptr, &tv);
+        if (ready <= 0)
+        {
+            DEBUGF(INDI::Logger::DBG_SESSION,
+                   "Timed out waiting for initial V4L2 frame %u/%u",
+                   discarded, count);
+            return false;
+        }
+
+        struct v4l2_buffer buf = {};
+        buf.type = v4l2_is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        struct v4l2_plane planes[1] = {};
+        if (v4l2_is_mplane)
+        {
+            buf.length = 1;
+            buf.m.planes = planes;
+        }
+
+        if (ioctl(v4l2_fd, VIDIOC_DQBUF, &buf) < 0)
+        {
+            DEBUGF(INDI::Logger::DBG_SESSION,
+                   "VIDIOC_DQBUF failed while discarding initial frame: %s",
+                   strerror(errno));
+            return false;
+        }
+
+        if (v4l2_is_mplane)
+        {
+            buf.length = 1;
+            buf.m.planes = planes;
+        }
+        if (ioctl(v4l2_fd, VIDIOC_QBUF, &buf) < 0)
+        {
+            DEBUGF(INDI::Logger::DBG_SESSION,
+                   "VIDIOC_QBUF failed while discarding initial frame: %s",
+                   strerror(errno));
+            return false;
+        }
+        discarded++;
+    }
+
+    DEBUGF(INDI::Logger::DBG_SESSION,
+           "Discarded %u initial V4L2 frames", discarded);
     return true;
 }
 
@@ -3352,7 +3885,7 @@ bool indi_qhy_v4l2::setV4L2Exposure(double value)
 
     struct v4l2_control ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
-    ctrl.id = V4L2_CID_EXPOSURE;
+    ctrl.id = V4L2_CID_EXPOSURE_ABSOLUTE;
     ctrl.value = static_cast<int32_t>(std::llround(value));
 
     if (ioctl(v4l2_subdev_fd, VIDIOC_S_CTRL, &ctrl) < 0)
@@ -3362,7 +3895,8 @@ bool indi_qhy_v4l2::setV4L2Exposure(double value)
         return false;
     }
 
-    DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 sub-device exposure set to %d", ctrl.value);
+    DEBUGF(INDI::Logger::DBG_SESSION,
+           "V4L2 absolute exposure set to %d (100us units)", ctrl.value);
     return true;
 #else
     return false;
@@ -3496,7 +4030,7 @@ void indi_qhy_v4l2::updateV4L2SubdevExposureRange()
         return;
 
     struct v4l2_queryctrl query = {};
-    query.id = V4L2_CID_EXPOSURE;
+    query.id = V4L2_CID_EXPOSURE_ABSOLUTE;
 
     if (ioctl(v4l2_subdev_fd, VIDIOC_QUERYCTRL, &query) == 0)
     {
@@ -3504,13 +4038,19 @@ void indi_qhy_v4l2::updateV4L2SubdevExposureRange()
         v4l2_subdev_exposure_min = query.minimum;
         v4l2_subdev_exposure_max = query.maximum;
 
+        const double minSeconds = query.minimum / 10000.0;
+        const double maxSeconds = query.maximum / 10000.0;
+        const double stepSeconds = std::max(0.0001, query.step / 10000.0);
+        PrimaryCCD.setMinMaxStep("CCD_EXPOSURE", "CCD_EXPOSURE_VALUE",
+                                 minSeconds, maxSeconds, stepSeconds, false);
+
         // 确保当前曝光值在有效范围内
         if (v4l2_subdev_exposure < v4l2_subdev_exposure_min)
             v4l2_subdev_exposure = v4l2_subdev_exposure_min;
         if (v4l2_subdev_exposure > v4l2_subdev_exposure_max)
             v4l2_subdev_exposure = v4l2_subdev_exposure_max;
 
-        DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 subdev exposure range updated: %.0f - %.0f ms (current: %.0f ms)",
+        DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 absolute exposure range updated: %.0f - %.0f (100us units) (current: %.0f)",
                v4l2_subdev_exposure_min, v4l2_subdev_exposure_max, v4l2_subdev_exposure);
     }
     else
@@ -3527,15 +4067,15 @@ void indi_qhy_v4l2::syncV4L2ExposureFromDuration(double duration) //根据上位
         return;
 
     if (duration <= 0)
-        duration = 0.001;
+        duration = std::max(0.0001, v4l2_subdev_exposure_min / 10000.0);
 
     // 使用成员变量存储的曝光范围（从 updateV4L2SubdevExposureRange 中查询得到）
     double minValue = v4l2_subdev_exposure_min;
     double maxValue = v4l2_subdev_exposure_max;
 
-    // 将秒转换为毫秒
-    double milliseconds = duration * 1000.0;
-    int32_t target = static_cast<int32_t>(std::round(milliseconds));
+    // V4L2_CID_EXPOSURE_ABSOLUTE uses 100 microsecond units.
+    double exposure100us = duration * 10000.0;
+    int32_t target = static_cast<int32_t>(std::round(exposure100us));
 
     // 限制在设备支持的范围内
     if (target < static_cast<int32_t>(minValue))
@@ -3551,7 +4091,8 @@ void indi_qhy_v4l2::syncV4L2ExposureFromDuration(double duration) //根据上位
     else
     {
         v4l2_subdev_exposure = target;  // 更新内部变量
-        DEBUGF(INDI::Logger::DBG_SESSION, "Auto-synced V4L2 exposure to %d ms for duration %.3f s (range: %.0f-%.0f)",
+        DEBUGF(INDI::Logger::DBG_SESSION,
+               "Auto-synced V4L2 absolute exposure to %d (100us units) for duration %.3f s (range: %.0f-%.0f)",
                target, duration, minValue, maxValue);
     }
 #else
@@ -3670,7 +4211,7 @@ void indi_qhy_v4l2::updateV4L2GainRange()
         return;
 
     struct v4l2_queryctrl query = {};
-    query.id = 0x009e0903;  // V4L2_CID_ANALOGUE_GAIN
+    query.id = V4L2_CID_ANALOGUE_GAIN;
 
     if (ioctl(v4l2_subdev_fd, VIDIOC_QUERYCTRL, &query) == 0)
     {
@@ -3710,7 +4251,7 @@ bool indi_qhy_v4l2::setV4L2Gain(int32_t gain)
         gain = v4l2_subdev_gain_max;
 
     struct v4l2_control ctrl = {};
-    ctrl.id = 0x009e0903;  // V4L2_CID_ANALOGUE_GAIN
+    ctrl.id = V4L2_CID_ANALOGUE_GAIN;
     ctrl.value = gain;
 
     if (ioctl(v4l2_subdev_fd, VIDIOC_S_CTRL, &ctrl) < 0)
@@ -3736,7 +4277,7 @@ bool indi_qhy_v4l2::getV4L2Gain(int32_t *gain)
         return false;
 
     struct v4l2_control ctrl = {};
-    ctrl.id = 0x009e0903;  // V4L2_CID_ANALOGUE_GAIN
+    ctrl.id = V4L2_CID_ANALOGUE_GAIN;
 
     if (ioctl(v4l2_subdev_fd, VIDIOC_G_CTRL, &ctrl) < 0)
     {
@@ -3753,106 +4294,69 @@ bool indi_qhy_v4l2::getV4L2Gain(int32_t *gain)
 #endif
 }
 
-// 写入单个寄存器（通过 V4L2 子设备）
-bool indi_qhy_v4l2::writeV4L2Register(uint16_t reg, uint8_t value)
+void indi_qhy_v4l2::updateV4L2OffsetRange()
 {
 #ifdef __linux__
+    v4l2_offset_supported = false;
     if (v4l2_subdev_fd < 0)
     {
-        DEBUG(INDI::Logger::DBG_WARNING, "V4L2 subdevice not open");
-        return false;
+        DEBUG(INDI::Logger::DBG_DEBUG, "V4L2 subdevice not open; offset control unavailable");
+        return;
     }
 
-    // 使用 VIDIOC_DBG_S_REGISTER ioctl
-    struct v4l2_dbg_register dbg_reg = {};
-    dbg_reg.match.type = V4L2_CHIP_MATCH_SUBDEV;
-    dbg_reg.match.addr = 0;  // 子设备地址
-    dbg_reg.reg = reg;
-    dbg_reg.val = value;
-    dbg_reg.size = 1;  // 1 字节
-
-    if (ioctl(v4l2_subdev_fd, VIDIOC_DBG_S_REGISTER, &dbg_reg) < 0)
+    struct v4l2_queryctrl query = {};
+    query.id = V4L2_CID_BLACK_LEVEL;
+    if (ioctl(v4l2_subdev_fd, VIDIOC_QUERYCTRL, &query) < 0 ||
+        (query.flags & V4L2_CTRL_FLAG_DISABLED))
     {
-        DEBUGF(INDI::Logger::DBG_WARNING, "Failed to write register 0x%04x = 0x%02x: %s", 
-               reg, value, strerror(errno));
-        return false;
+        DEBUGF(INDI::Logger::DBG_DEBUG, "V4L2 black-level control unavailable: %s", strerror(errno));
+        return;
     }
 
-    DEBUGF(INDI::Logger::DBG_DEBUG, "Wrote register 0x%04x = 0x%02x", reg, value);
-    return true;
+    v4l2_offset_supported = true;
+    v4l2_subdev_offset_control_id = V4L2_CID_BLACK_LEVEL;
+    v4l2_subdev_offset_min = query.minimum;
+    v4l2_subdev_offset_max = query.maximum;
+    v4l2_subdev_offset_step = query.step > 0 ? query.step : 1;
+
+    struct v4l2_control ctrl = {};
+    ctrl.id = v4l2_subdev_offset_control_id;
+    if (ioctl(v4l2_subdev_fd, VIDIOC_G_CTRL, &ctrl) == 0)
+        v4l2_subdev_offset = ctrl.value;
+
+    DEBUGF(INDI::Logger::DBG_SESSION,
+           "V4L2 black level range: min=%d max=%d step=%d current=%d",
+           v4l2_subdev_offset_min, v4l2_subdev_offset_max,
+           v4l2_subdev_offset_step, v4l2_subdev_offset);
 #else
-    (void)reg;
-    (void)value;
-    return false;
+    v4l2_offset_supported = false;
 #endif
 }
 
-// 读取单个寄存器
-bool indi_qhy_v4l2::readV4L2Register(uint16_t reg, uint8_t *value)
-{
-#ifdef __linux__
-    if (v4l2_subdev_fd < 0 || !value)
-        return false;
-
-    struct v4l2_dbg_register dbg_reg = {};
-    dbg_reg.match.type = V4L2_CHIP_MATCH_SUBDEV;
-    dbg_reg.match.addr = 0;
-    dbg_reg.reg = reg;
-    dbg_reg.size = 1;
-
-    if (ioctl(v4l2_subdev_fd, VIDIOC_DBG_G_REGISTER, &dbg_reg) < 0)
-    {
-        DEBUGF(INDI::Logger::DBG_WARNING, "Failed to read register 0x%04x: %s", 
-               reg, strerror(errno));
-        return false;
-    }
-
-    *value = (uint8_t)dbg_reg.val;
-    DEBUGF(INDI::Logger::DBG_DEBUG, "Read register 0x%04x = 0x%02x", reg, *value);
-    return true;
-#else
-    (void)reg;
-    (void)value;
-    return false;
-#endif
-}
-
-// 设置偏移量（通过两个寄存器）
+// 设置偏移量（通过标准 V4L2 black-level 控件）
 bool indi_qhy_v4l2::setV4L2Offset(int32_t offset)
 {
 #ifdef __linux__
-    if (v4l2_subdev_fd < 0)
-    {
-        DEBUG(INDI::Logger::DBG_WARNING, "V4L2 subdevice not open");
+    if (v4l2_subdev_fd < 0 || !v4l2_offset_supported)
         return false;
-    }
 
-    // 限制在有效范围内（12位：0-4095）
     if (offset < v4l2_subdev_offset_min)
         offset = v4l2_subdev_offset_min;
     if (offset > v4l2_subdev_offset_max)
         offset = v4l2_subdev_offset_max;
 
-    // 分解为高低字节
-    uint8_t offset_h = (offset >> 8) & 0x0F;  // 高4位
-    uint8_t offset_l = offset & 0xFF;          // 低8位
-
-    // 写入 REG_OFFSET_H (0x3907)
-    if (!writeV4L2Register(0x3907, offset_h))
+    struct v4l2_control ctrl = {};
+    ctrl.id = v4l2_subdev_offset_control_id;
+    ctrl.value = offset;
+    if (ioctl(v4l2_subdev_fd, VIDIOC_S_CTRL, &ctrl) < 0)
     {
-        DEBUG(INDI::Logger::DBG_WARNING, "Failed to write REG_OFFSET_H");
-        return false;
-    }
-
-    // 写入 REG_OFFSET_L (0x3908)
-    if (!writeV4L2Register(0x3908, offset_l))
-    {
-        DEBUG(INDI::Logger::DBG_WARNING, "Failed to write REG_OFFSET_L");
+        DEBUGF(INDI::Logger::DBG_WARNING, "Failed to set V4L2 black level to %d: %s",
+               offset, strerror(errno));
         return false;
     }
 
     v4l2_subdev_offset = offset;
-    DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 offset set to %d (0x%03x)", offset, offset);
+    DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 black level set to %d", offset);
     return true;
 #else
     (void)offset;
@@ -3864,27 +4368,15 @@ bool indi_qhy_v4l2::setV4L2Offset(int32_t offset)
 bool indi_qhy_v4l2::getV4L2Offset(int32_t *offset)
 {
 #ifdef __linux__
-    if (v4l2_subdev_fd < 0 || !offset)
+    if (v4l2_subdev_fd < 0 || !v4l2_offset_supported || !offset)
         return false;
 
-    uint8_t offset_h = 0, offset_l = 0;
-
-    // 读取 REG_OFFSET_H (0x3907)
-    if (!readV4L2Register(0x3907, &offset_h))
-    {
-        DEBUG(INDI::Logger::DBG_WARNING, "Failed to read REG_OFFSET_H");
+    struct v4l2_control ctrl = {};
+    ctrl.id = v4l2_subdev_offset_control_id;
+    if (ioctl(v4l2_subdev_fd, VIDIOC_G_CTRL, &ctrl) < 0)
         return false;
-    }
 
-    // 读取 REG_OFFSET_L (0x3908)
-    if (!readV4L2Register(0x3908, &offset_l))
-    {
-        DEBUG(INDI::Logger::DBG_WARNING, "Failed to read REG_OFFSET_L");
-        return false;
-    }
-
-    // 组合为12位值
-    *offset = ((offset_h & 0x0F) << 8) | offset_l;
+    *offset = ctrl.value;
     v4l2_subdev_offset = *offset;
     return true;
 #else

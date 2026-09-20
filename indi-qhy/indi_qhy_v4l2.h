@@ -65,7 +65,11 @@ bool checkingDevices = false;
 class indi_qhy_v4l2 : public INDI::CCD
 {
 public:
-    indi_qhy_v4l2();
+    indi_qhy_v4l2(const std::string &name = "QHY CCD V4L2",
+                  const std::string &videoPath = "",
+                  const std::string &subdevPath = "",
+                  const std::string &role = "",
+                  double discoveredPixelSize = 0.0);
     ~indi_qhy_v4l2();
     void ISGetProperties(const char *dev) override;
     virtual bool ISNewNumber (const char *dev, const char *name, double values[], char *names[], int n) override;
@@ -141,9 +145,11 @@ private:
     float getRGBImageDataFloatValue(int x, int y, int channel);
 
     //These are our device capture settings
+    std::string defaultDeviceName;
     bool use16Bit = true;
     std::string videoDevice = "";
     std::string videoSource = "";
+    std::string v4l2_role = "";
     int frameRate = 0;
     std::string videoSize = "";
     std::string inputPixelFormat = "";
@@ -264,19 +270,22 @@ private:
     void **v4l2_mmap_ptrs = nullptr;                // V4L2 内存映射指针数组
     size_t *v4l2_mmap_lens = nullptr;               // V4L2 内存映射长度数组
     bool v4l2_force_16bit = false;                  // V4L2 是否强制 16 位
-    std::string v4l2_subdev_path { "/dev/v4l-subdev3" };// 子设备路径主要用来设置相机参数
-    double v4l2_subdev_exposure = 1000.0;           // 子设备曝光时间
+    std::string v4l2_subdev_path;                  // 由设备树/媒体拓扑动态发现
+    double v4l2_subdev_exposure = 10000.0;           // 子设备曝光时间
     int v4l2_subdev_fd = -1;                         // 子设备文件描述符
-    double v4l2_subdev_exposure_min = 1.0;          // 子设备最小曝光时间（毫秒）
-    double v4l2_subdev_exposure_max = 10000.0;      // 子设备最大曝光时间（毫秒）
+    double v4l2_subdev_exposure_min = 1.0;          // 子设备最小曝光时间（100微秒单位）
+    double v4l2_subdev_exposure_max = 100000.0;      // 子设备最大曝光时间（100微秒单位）
     
     // V4L2 增益和偏移量控制
     int32_t v4l2_subdev_gain = 64;                  // 模拟增益值（默认64）
     int32_t v4l2_subdev_gain_min = 64;              // 最小增益
     int32_t v4l2_subdev_gain_max = 90112;           // 最大增益
-    int32_t v4l2_subdev_offset = 0;                 // 偏移量值（通过寄存器设置）
+    int32_t v4l2_subdev_offset = 0;                 // 偏移量值（通过 V4L2 控件设置）
     int32_t v4l2_subdev_offset_min = 0;             // 最小偏移量
-    int32_t v4l2_subdev_offset_max = 4095;          // 最大偏移量（12位：0-4095）
+    int32_t v4l2_subdev_offset_max = 0;
+    int32_t v4l2_subdev_offset_step = 1;
+    uint32_t v4l2_subdev_offset_control_id = V4L2_CID_BLACK_LEVEL;
+    bool v4l2_offset_supported = false;
 
     // Optional raw save after exposure
     bool save_raw_enable = true;
@@ -294,6 +303,7 @@ private:
     bool DisconnectV4L2();
     bool getStreamFrameV4L2();
     bool flush_frame_bufferV4L2();
+    bool discardInitialV4L2Frames(unsigned int count);
     bool setupV4L2Streaming();
     void freeV4L2Memory();
     
@@ -318,10 +328,10 @@ private:
     bool setV4L2Gain(int32_t gain);                     // 设置模拟增益
     bool getV4L2Gain(int32_t *gain);                    // 获取当前增益
     void updateV4L2GainRange();                         // 更新增益范围
-    bool setV4L2Offset(int32_t offset);                 // 设置偏移量（通过寄存器）
+    bool setV4L2Offset(int32_t offset);                 // 设置偏移量（通过 V4L2 控件）
     bool getV4L2Offset(int32_t *offset);                // 获取当前偏移量
-    bool writeV4L2Register(uint16_t reg, uint8_t value); // 写入单个寄存器
-    bool readV4L2Register(uint16_t reg, uint8_t *value); // 读取单个寄存器
+    void updateV4L2OffsetRange();                       // 查询标准黑电平控件
+    void updateV4L2ImageMetadata();                     // 根据 FOURCC 更新位深和 Bayer
     
     bool setV4L2Crop(int x, int y, int w, int h);
     struct v4l2_rect getV4L2Crop();
