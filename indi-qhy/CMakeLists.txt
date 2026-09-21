@@ -66,10 +66,10 @@ ENDIF ()
 add_executable(indi_qhy_ccd ${indiqhy_SRCS})
 target_compile_definitions(indi_qhy_ccd PRIVATE QHY_V4L2_VERSION_MAJOR=0 QHY_V4L2_VERSION_MINOR=2)
 
-target_link_libraries(indi_qhy_ccd ${INDI_LIBRARIES} ${CFITSIO_LIBRARIES} ${QHY_LIBRARIES} ${USB1_LIBRARIES} ${NOVA_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT}  )
+target_link_libraries(indi_qhy_ccd ${INDI_LIBRARIES} ${CFITSIO_LIBRARIES} ${QHY_LIBRARIES} ${USB1_LIBRARIES} ${NOVA_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 
 IF (${CMAKE_SYSTEM_NAME} MATCHES "Linux|FreeBSD")
-    target_link_libraries(indi_qhy_ccd rt  )
+    target_link_libraries(indi_qhy_ccd rt)
 endif()
 
 install(TARGETS indi_qhy_ccd RUNTIME DESTINATION bin )

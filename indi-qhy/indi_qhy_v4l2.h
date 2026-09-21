@@ -1,5 +1,5 @@
 /*
-INDI Webcam CCD Driver
+INDI QHY V4L2 CCD Driver
 
 Copyright (C) 2018 Robert Lancaster (rlancaste AT gmail DOT com)
 

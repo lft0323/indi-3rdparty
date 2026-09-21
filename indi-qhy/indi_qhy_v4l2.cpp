@@ -1,5 +1,5 @@
 /*
-INDI QHY CCD CCD Driver
+INDI QHY V4L2 CCD Driver
 
 Copyright (C) 2018 Robert Lancaster (rlancaste AT gmail DOT com)
 
@@ -38,8 +38,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #ifdef __linux__
 #include <dirent.h>
 #include <linux/media.h>
-#include <signal.h>
-#include <sys/prctl.h>
 #include <sys/select.h>
 #include <sys/sysmacros.h>
 #endif
@@ -51,22 +49,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #ifndef QHY_V4L2_DIRECT_DEVICE
 #define QHY_V4L2_DIRECT_DEVICE "V4L2 Direct"
 #endif
-#endif
-
-#ifdef __linux__
-namespace
-{
-struct ParentDeathGuard
-{
-    ParentDeathGuard()
-    {
-        if (prctl(PR_SET_PDEATHSIG, SIGTERM) == 0 && getppid() == 1)
-            _exit(1);
-    }
-};
-
-ParentDeathGuard parentDeathGuard;
-}
 #endif
 
 #ifdef __linux__
@@ -401,8 +383,11 @@ std::vector<V4L2CameraDescriptor> discoverV4L2Cameras()
     while (const dirent *entry = readdir(dir))
     {
         const std::string base = std::string("/sys/bus/i2c/devices/") + entry->d_name + "/of_node/";
-        const std::string role = readDeviceTreeString(base + "qhy,indi-role");
+        const std::string configuredName = readDeviceTreeString(base + "qhy,indi-name");
+        if (configuredName.empty())
+            continue;
 
+        const std::string role = readDeviceTreeString(base + "qhy,indi-role");
         const std::string subdev = findSensorSubdev(entry->d_name);
         const std::string video = findSensorVideoNode(entry->d_name, videoNodes);
         if (subdev.empty() || video.empty())
@@ -412,8 +397,7 @@ std::vector<V4L2CameraDescriptor> discoverV4L2Cameras()
             continue;
         }
 
-        const std::string configuredName = readDeviceTreeString(base + "qhy,indi-name");
-        std::string deviceName = "QHY CCD " + (configuredName.empty() ? entry->d_name : configuredName);
+        std::string deviceName = "QHY CCD " + configuredName;
         if (!role.empty())
             deviceName += " " + roleTitle(role);
         else
@@ -537,13 +521,11 @@ bool indi_qhy_v4l2::ConnectToSource(const std::string &source)
 //It returns true if it was successful.
 bool indi_qhy_v4l2::reconnectSource()
 {
-    int attempt = 0;
-    while(attempt < 10)
+    for (int attempt = 0; attempt < 10; ++attempt)
     {
-        if(ConnectToSource(videoSource))
+        if (ConnectToSource(videoSource))
             return true;
     }
-    //All 10 attempts resulted in failure.
     return false;
 }
 
@@ -1761,11 +1743,6 @@ void indi_qhy_v4l2::finishExposure()
         }
         v4l2_streaming = false;
 
-        // CRITICAL: Delay BEFORE any other operations to ensure driver cleanup
-        // Rockchip CIF/MIPI-CSI2 drivers need substantial time to complete cleanup
-        // Testing shows 50ms is insufficient, causing next STREAMON to succeed but not start stream
-        usleep(200000); // 200ms
-        DEBUG(INDI::Logger::DBG_SESSION, "Waited 200ms for driver cleanup");
     }
 
     // Now proceed with image processing and sending
@@ -2107,37 +2084,6 @@ bool indi_qhy_v4l2::ConnectToSourceV4L2(std::string source)
         return false;
     }
 
-    // Disable an optional capture-pipeline compact mode before negotiating the format.
-    // The control is discovered relative to the selected video node, so no board
-    // or fixed video-node path is required. Devices without this optional control
-    // continue without any special handling.
-    const std::string videoName = source.substr(source.find_last_of('/') + 1);
-    const std::string sysfsDevice = "/sys/class/video4linux/" + videoName + "/device";
-    char resolvedDevice[PATH_MAX] {};
-    if (realpath(sysfsDevice.c_str(), resolvedDevice) != nullptr)
-    {
-        std::string parent = resolvedDevice;
-        for (int level = 0; level < 16 && parent.rfind("/sys/", 0) == 0; ++level)
-        {
-            const std::string compactControl = parent + "/compact_test";
-            FILE *fp = fopen(compactControl.c_str(), "w");
-            if (fp)
-            {
-                if (fprintf(fp, "0 0 0 0") >= 0)
-                    DEBUGF(INDI::Logger::DBG_SESSION,
-                           "Disabled optional compact capture mode via %s",
-                           compactControl.c_str());
-                fclose(fp);
-                break;
-            }
-
-            const size_t slash = parent.find_last_of('/');
-            if (slash == std::string::npos || slash <= 4)
-                break;
-            parent.resize(slash);
-        }
-    }
-
     struct v4l2_capability cap = {};
     if (ioctl(v4l2_fd, VIDIOC_QUERYCAP, &cap) < 0)
     {
@@ -2176,7 +2122,7 @@ bool indi_qhy_v4l2::ConnectToSourceV4L2(std::string source)
     }
 
     // Re-submit the complete current format even when no size was configured.
-    // This reinitializes Rockchip CIF with the negotiated Bayer FOURCC (GB12 for IMX585).
+    // This lets the V4L2 driver reinitialize its negotiated format.
     unsigned int reqw = 0, reqh = 0;
     const bool hasRequestedSize = sscanf(videoSize.c_str(), "%ux%u", &reqw, &reqh) == 2 && reqw > 0 && reqh > 0;
     if (hasRequestedSize)
