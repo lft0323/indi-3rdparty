@@ -28,19 +28,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <indiccd.h>
 #include <stream/streammanager.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-#include <libavcodec/avcodec.h>
-#include <libavdevice/avdevice.h>
-#include <libavformat/avformat.h>
-#include <libavutil/imgutils.h>
-#include <libswscale/swscale.h>
-#include <libavutil/version.h>
-
-#ifdef __cplusplus
-}
-#endif
 //#include <ctime>
 #include <thread>
 
@@ -123,8 +110,6 @@ private:
     bool reconnectSource();
 
     //These are related to updating the device list
-    void findAVFoundationVideoSources();
-    int getNumOfInputDevices();
     bool refreshInputDevices();
     bool refreshInputSources();
     ISwitch RefreshS[1];
@@ -163,9 +148,7 @@ private:
     std::string customURL = "";
     std::string url = "";
 
-    //The timeout for avformat commands like av_open_input and av_read_frame
-    double ffmpegTimeout = 0;
-    //The timeout for how long of a wait time constitutes a buffered frame vs a new frame
+    // Maximum wait time used while polling a V4L2 buffer.
     double bufferTimeout = 0;
 
     //The pixel size for the camera
@@ -206,7 +189,7 @@ private:
     ISwitch *PixelSizes = nullptr;
     ISwitchVectorProperty PixelSizeSelection;
 
-    INumber TimeoutOptionsT[2] {};
+    INumber TimeoutOptionsT[1] {};
     INumberVectorProperty TimeoutOptionsTP;
     INumber PixelSizeT[1] {};
     INumberVectorProperty PixelSizeTP;
@@ -236,28 +219,8 @@ private:
     void start_capturing();
     void stop_capturing();
 
-    //FFMpeg Variables to make captures work.
-    struct SwsContext *sws_ctx;
     uint8_t *buffer;
     int numBytes = 0;
-    AVPixelFormat out_pix_fmt;
-    AVFormatContext *pFormatCtx;
-    int              videoStream;
-    AVCodecContext  *pCodecCtx;
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 0, 100)
-    AVCodec         *pCodec;
-#else
-    const AVCodec         *pCodec;
-#endif
-    AVFrame         *pFrame;
-    AVFrame         *pFrameOUT;
-    AVDictionary *optionsDict;
-
-    //FFMpeg Video Adjustments
-    double brightness = 0.0;
-    double contrast = 1.0;
-    double saturation = 1.0;
-    void updateVideoAdjustments();
 
     // V4L2 direct access for Multiplanar devices
     bool use_v4l2_direct = false;                    // 标志：是否使用 V4L2 直接模式
