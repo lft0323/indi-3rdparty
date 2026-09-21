@@ -376,3 +376,37 @@
   - indi_qhy_ccd clean-first 编译和链接成功，仅有既有 libindi 弃用警告。
   - 新程序已安装，构建产物与 /usr/bin/indi_qhy_ccd SHA-256 一致，quarcs-client.service 为 active。
   - FFmpeg 依赖回归检查仍为空。
+
+## 2026-09-21 13:47
+- 修改目标：清理整合后的 QHY V4L2 驱动中遗留的网络摄像头配置，并提高官方提交兼容性。
+- 修改文件：
+  - indi-qhy/indi_qhy_v4l2.cpp
+  - indi-qhy/indi_qhy_v4l2.h
+  - indi-qhy/CMakeLists.txt
+  - backups/20260921_before_legacy_stream_config_cleanup/
+  - WORKLOG.md
+- 修改原因与内容：
+  - 删除旧的在线/IP 摄像头属性、URL/账号字段、网络源处理函数及配置保存项；V4L2 Direct 保留。
+  - 将 Linux V4L2 源文件限制为 Linux 平台编译，其他平台保留原 QHY 源文件。
+  - 将采集管线的可选 compact 控制改为根据当前 video 节点的 sysfs 祖先路径动态查找，移除板级固定路径。
+  - 统一三个有效源码文件为 LF 行尾并清除尾随空白。
+- 影响范围：
+  - 原生 QHY SDK 和 V4L2 Direct 采集、设备发现、曝光、增益、偏置和图像格式处理保留。
+  - 不再提供已移除的网络/IP 视频源配置。
+- 验证结果：
+  - 已完成源码残留扫描和格式检查；编译验证进行中。
+
+## 2026-09-21 13:54
+- 修改目标：完成旧网络/FFmpeg 兼容配置清理后的验证。
+- 修改文件：
+  - WORKLOG.md
+- 修改原因与内容：
+  - 补充本次验证结果，记录源码、构建、二进制依赖和运行冒烟测试状态。
+- 影响范围：
+  - QHY V4L2 Direct 保持；独立 indi-webcam 的 FFmpeg 检测未修改。
+- 验证结果：
+  - `cmake --build /root/Projects/build/indi-3rdparty --target indi_qhy_ccd --clean-first -j4` 成功。
+  - 仅保留既有 libindi 弃用警告；没有新增编译错误。
+  - `indi_qhy_ccd` 的 ldd、readelf、strings 均未发现 FFmpeg 库、动态项或字符串。
+  - 直接启动驱动成功完成初始化、V4L2 管线扫描和 EOF 退出；当前板端发现 `QHY CCD QHY26800A Guide`。
+  - 有效源码统一为 LF 行尾且无尾随空白；旧网络/IP 配置和禁用代码扫描为空。

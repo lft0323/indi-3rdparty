@@ -50,12 +50,17 @@ IF (APPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/qhy_ccd.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/qhy_fw.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/qhy_ccd_hotplug_handler.cpp)
+ELSEIF (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    SET(indiqhy_SRCS
+        ${CMAKE_CURRENT_SOURCE_DIR}/qhy_ccd.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/qhy_ccd_hotplug_handler.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/indi_qhy_v4l2.cpp)
+    # Force linking all referenced libraries because the recent libqhy versions are not linked against libpthread
+    SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-as-needed")
 ELSE ()
     SET(indiqhy_SRCS
         ${CMAKE_CURRENT_SOURCE_DIR}/qhy_ccd.cpp
-        qhy_ccd_hotplug_handler.cpp indi_qhy_v4l2.cpp)
-    # Force linking all referenced libraries because the recent libqhy versions are not linked against libpthread
-    SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-as-needed")
+        ${CMAKE_CURRENT_SOURCE_DIR}/qhy_ccd_hotplug_handler.cpp)
 ENDIF ()
 
 add_executable(indi_qhy_ccd ${indiqhy_SRCS})

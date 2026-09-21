@@ -76,7 +76,7 @@ protected:
     bool grabImage();
 
     bool UpdateCCDFrame(int x, int y, int w, int h) override;
-    
+
     // Custom gain and offset controls; these do not override base-class methods.
     bool SetCCDGain(double gain);
     bool SetCCDOffset(double offset);
@@ -95,10 +95,8 @@ private:
     bool convertINDI_RGBtoFITS_RGB(uint8_t *originalImage, uint8_t *convertedImage);
 
     //These are related to how we change sources
-    bool ConnectToSource(std::string device, std::string source, int framerate, std::string videosize, std::string inputpixelformat,  std::string urlSource);
+    bool ConnectToSource(const std::string &source);
     bool ChangeSource(std::string newDevice, std::string newSource, int newFramerate, std::string newInputPixelFormat, std::string newVideosize);
-    bool ChangeOnlineSource(std::string newProtocol, std::string newIPAddress, std::string newPort, std::string newUserName, std::string newPassword);
-    bool ChangeOnlineSource(std::string newURL);
     bool reconnectSource();
 
     //These are related to updating the device list
@@ -131,15 +129,6 @@ private:
     std::string videoSize = "";
     std::string inputPixelFormat = "";
     std::string outputFormat = "";
-    //These are our online device capture settings
-    std::string protocol = "";
-    std::string IPAddress = "";
-    std::string port = "";
-    std::string username = "";
-    std::string password = "";
-    std::string customURL = "";
-    std::string url = "";
-
     // Maximum wait time used while polling a V4L2 buffer.
     double bufferTimeout = 0;
 
@@ -149,17 +138,11 @@ private:
     //Related to Options in the Control Panel
     IText InputOptionsT[6] {};
     ITextVectorProperty InputOptionsTP;
-    IText OnlineInputOptions[4] {};
-    ITextVectorProperty OnlineInputOptionsP;
-    IText URLPathT[1] {};
-    ITextVectorProperty URLPathTP;
 #ifdef __linux__
     IText V4L2SubdevPathT[1] {};
     ITextVectorProperty V4L2SubdevPathTP;
 #endif
 
-    ISwitch *OnlineProtocols = nullptr;
-    ISwitchVectorProperty OnlineProtocolSelection;
     ISwitch *CaptureDevices = nullptr;
     ISwitchVectorProperty CaptureDeviceSelection;
     ISwitch *CaptureSources = nullptr;
@@ -188,7 +171,7 @@ private:
     INumber VideoAdjustmentsT[3] {};
     INumberVectorProperty VideoAdjustmentsTP;
     // Exposure is controlled by the client through CCD_EXPOSURE.
-    
+
     // V4L2 gain and offset properties.
     INumber GainT[1] {};
     INumberVectorProperty GainTP;
@@ -230,7 +213,7 @@ private:
     int v4l2_subdev_fd = -1;
     double v4l2_subdev_exposure_min = 1.0;          // Minimum exposure in 100 microsecond units.
     double v4l2_subdev_exposure_max = 100000.0;     // Maximum exposure in 100 microsecond units.
-    
+
     // V4L2 gain and offset controls.
     int32_t v4l2_subdev_gain = 64;
     int32_t v4l2_subdev_gain_min = 64;
@@ -253,7 +236,7 @@ private:
     // Driver info property (for external clients setting DRIVER_INFO)
     IText DriverInfoT[4] {};
     ITextVectorProperty DriverInfoTP;
-    
+
     bool ConnectToSourceV4L2(std::string source);
     bool DisconnectV4L2();
     bool getStreamFrameV4L2();
@@ -261,7 +244,7 @@ private:
     bool discardInitialV4L2Frames(unsigned int count);
     bool setupV4L2Streaming();
     void freeV4L2Memory();
-    
+
     // Enhanced V4L2 functions
     bool enumerateV4L2Formats();
     bool enumerateV4L2Sizes();
@@ -278,7 +261,7 @@ private:
     void closeV4L2Subdevice();
     void updateV4L2SubdevExposureRange();
     void syncV4L2ExposureFromDuration(double duration);
-    
+
     bool setV4L2Gain(int32_t gain);
     bool getV4L2Gain(int32_t *gain);
     void updateV4L2GainRange();
@@ -286,7 +269,7 @@ private:
     bool getV4L2Offset(int32_t *offset);
     void updateV4L2OffsetRange();                       // Queries the standard black-level control.
     void updateV4L2ImageMetadata();                     // Updates bit depth and Bayer metadata from FOURCC.
-    
+
     bool setV4L2Crop(int x, int y, int w, int h);
     struct v4l2_rect getV4L2Crop();
     bool v4l2_can_crop = false;

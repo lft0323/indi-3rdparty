@@ -509,22 +509,19 @@ bool indi_qhy_v4l2::Connect()
     DEBUGF(INDI::Logger::DBG_SESSION, "Trying to connect to: %s, on device: %s with %s at %u frames per second",
            videoSource.c_str(), videoDevice.c_str(), videoSize.c_str(), frameRate);
 
-    rc = ConnectToSource(videoDevice, videoSource, frameRate, videoSize, inputPixelFormat, url.c_str());
+    rc = ConnectToSource(videoSource);
     return rc;
 }
 
 // V4L2 is the only supported capture backend on Linux.
 
-bool indi_qhy_v4l2::ConnectToSource(std::string device, std::string source, int, std::string, std::string,
-                                    std::string)
+bool indi_qhy_v4l2::ConnectToSource(const std::string &source)
 {
 #ifdef __linux__
-    (void)device;
     if (isConnected())
         DisconnectV4L2();
-    if (source.empty())
-        source = videoSource;
-    if (!ConnectToSourceV4L2(source))
+    const std::string sourcePath = source.empty() ? videoSource : source;
+    if (!ConnectToSourceV4L2(sourcePath))
         return false;
 
     updateV4L2ImageMetadata();
@@ -543,7 +540,7 @@ bool indi_qhy_v4l2::reconnectSource()
     int attempt = 0;
     while(attempt < 10)
     {
-        if(ConnectToSource(videoDevice, videoSource, frameRate, videoSize, inputPixelFormat, url))
+        if(ConnectToSource(videoSource))
             return true;
     }
     //All 10 attempts resulted in failure.
@@ -579,12 +576,12 @@ bool indi_qhy_v4l2::ChangeSource(std::string newDevice, std::string newSource, i
     }
 
     //This is an attempt to connect, if it is already connected.  If it is not successful, it goes back to the old settings.
-    if(ConnectToSource(newDevice, newSource, newFramerate, newVideosize, newInputPixelFormat, url) == false)
+    if(ConnectToSource(newSource) == false)
     {
         DEBUG(INDI::Logger::DBG_SESSION, "Connection was NOT successful");
         DEBUGF(INDI::Logger::DBG_SESSION, "Changing back to: %s, on device: %s with %s at %u frames per second",
                videoSource.c_str(), videoDevice.c_str(), videoSize.c_str(), frameRate);
-        ConnectToSource(videoDevice, videoSource, frameRate, videoSize, inputPixelFormat, url);
+        ConnectToSource(videoSource);
         if(was_streaming)
             StartStreaming();
         return false;
@@ -603,83 +600,6 @@ bool indi_qhy_v4l2::ChangeSource(std::string newDevice, std::string newSource, i
         StartStreaming();
     return true;
 }
-
-//This is the method that should be called to change the streaming device, source, framerate, or video size
-//If it was already connected, it will attempt a connection with the new settings and if it is not successful, it will revert to the old ones.
-//It should be safe to use while streaming or between image captures because it will pause them and return them to normal afterwards.
-bool indi_qhy_v4l2::ChangeOnlineSource(std::string newProtocol, std::string newIPAddress, std::string newPort, std::string newUserName,
-                                   std::string newPassword)
-{
-    std::string newURL;
-
-    if(!strcmp(newProtocol.c_str(), "CUSTOM"))
-        newURL = customURL;
-    else if(!strcmp(newProtocol.c_str(), "HTTP"))
-        newURL = "http://" + newUserName + ":" + newPassword + "@" + newIPAddress + ":" + newPort;
-    //else if(!strcmp(newProtocol.c_str(), "RTSP"))
-    //    newURL = "rstp://" + newIPAddress + ":" + newPort + "//user=" + newUserName + "_password=" + newPassword + "_channel=1_stream=0.sdp?real_stream";
-
-    if(ChangeOnlineSource(newURL))
-    {
-        protocol = newProtocol;
-        IPAddress = newIPAddress;
-        port = newPort;
-        username = newUserName;
-        password = newPassword;
-        return true;
-    }
-    return false;
-}
-
-bool indi_qhy_v4l2::ChangeOnlineSource(std::string newURL)
-{
-
-    //This will pause the streaming while it attempts the new connection settings.
-    bool was_streaming = false;
-    if(is_streaming)
-    {
-        was_streaming = true;
-        StopStreaming();
-    }
-
-    //This is the case if the source is not currently connected yet.
-    if(isConnected() == false)
-        DEBUG(INDI::Logger::DBG_SESSION, "Not connected now, accepting settings.  It will be tested on connection");
-    if(isConnected() == false || loadingSettings)
-    {
-        url = newURL;
-        IText *URLText = &URLPathT[0];
-        IUSaveText(URLText, newURL.c_str());
-        IDSetText(&URLPathTP, nullptr);
-        return true;
-    }
-
-    DEBUGF(INDI::Logger::DBG_SESSION, "Attempting to Connect: IP Camera at: %s", newURL.c_str());
-
-    //This is an attempt to connect, if it is already connected.  If it is not successful, it goes back to the old settings.
-    if(ConnectToSource(videoDevice, videoSource, frameRate, videoSize, inputPixelFormat, newURL) == false)
-    {
-        DEBUG(INDI::Logger::DBG_SESSION, "Connection was NOT successful");
-        DEBUGF(INDI::Logger::DBG_SESSION, "Changing back to IP Camera at: %s", url.c_str());
-        ConnectToSource(videoDevice, videoSource, frameRate, videoSize, inputPixelFormat, url);
-        if(was_streaming)
-            StartStreaming();
-        return false;
-    }
-
-    //This is what happens if the connection was successful, it saves the settings and continues.
-    DEBUG(INDI::Logger::DBG_SESSION, "Due to success, saving settings.");
-    url = newURL;
-    IText *URLText = &URLPathT[0];
-    IUSaveText(URLText, newURL.c_str());
-    IDSetText(&URLPathTP, nullptr);
-
-    //If it was streaming, we need to reinitialize that.
-    if(was_streaming)
-        StartStreaming();
-    return true;
-}
-
 
 /**************************************************************************************
 ** Client is asking us to terminate connection to the device
@@ -713,19 +633,19 @@ bool indi_qhy_v4l2::initProperties()
     setDefaultPollingPeriod(10);
 
     DEBUG(INDI::Logger::DBG_SESSION, "QHY CCD Driver initialized");
-    
+
 #ifdef __linux__
     // Gain and offset properties are available only for the V4L2 backend.
-    IUFillNumber(&GainT[0], "GAIN", "Gain", "%.0f", 
-                 static_cast<double>(v4l2_subdev_gain_min), 
-                 static_cast<double>(v4l2_subdev_gain_max), 
+    IUFillNumber(&GainT[0], "GAIN", "Gain", "%.0f",
+                 static_cast<double>(v4l2_subdev_gain_min),
+                 static_cast<double>(v4l2_subdev_gain_max),
                  1.0, static_cast<double>(v4l2_subdev_gain));
     IUFillNumberVector(&GainTP, GainT, 1, getDeviceName(), "CCD_GAIN",
                        "Gain", IMAGE_SETTINGS_TAB, IP_RW, 60, IPS_IDLE);
-    
-    IUFillNumber(&OffsetT[0], "OFFSET", "Offset", "%.0f", 
-                 static_cast<double>(v4l2_subdev_offset_min), 
-                 static_cast<double>(v4l2_subdev_offset_max), 
+
+    IUFillNumber(&OffsetT[0], "OFFSET", "Offset", "%.0f",
+                 static_cast<double>(v4l2_subdev_offset_min),
+                 static_cast<double>(v4l2_subdev_offset_max),
                  static_cast<double>(v4l2_subdev_offset_step),
                  static_cast<double>(v4l2_subdev_offset));
     IUFillNumberVector(&OffsetTP, OffsetT, 1, getDeviceName(), "CCD_OFFSET",
@@ -810,27 +730,8 @@ bool indi_qhy_v4l2::initProperties()
                      CONNECTION_TAB, IP_RW, 0, IPS_IDLE);
     defineProperty(&InputOptionsTP);
 
-    IUFillText(&OnlineInputOptions[0], "CAPTURE_IP_ADDRESS", "IP Address", IPAddress.c_str());
-    IUFillText(&OnlineInputOptions[1], "CAPTURE_PORT_NUMBER", "Port", port.c_str());
-    IUFillText(&OnlineInputOptions[2], "CAPTURE_USERNAME", "User Name", username.c_str());
-    IUFillText(&OnlineInputOptions[3], "CAPTURE_PASSWORD", "Password", password.c_str());
-    IUFillTextVector(&OnlineInputOptionsP, OnlineInputOptions, 4, getDeviceName(), "ONLINE_INPUT_OPTIONS", "IP Camera",
-                     CONNECTION_TAB, IP_RW, 0, IPS_IDLE);
-    defineProperty(&OnlineInputOptionsP);
 
-    OnlineProtocols = new ISwitch[3];
-    IUFillSwitch(&OnlineProtocols[0], "CUSTOM", "CUSTOM", ISS_OFF);
-    IUFillSwitch(&OnlineProtocols[1], "HTTP", "HTTP", ISS_ON);
-    //IUFillSwitch(&OnlineProtocols[2], "RTSP", "RTSP", ISS_OFF);
 
-    IUFillSwitchVector(&OnlineProtocolSelection, OnlineProtocols, 2, getDeviceName(), "ONLINE_PROTOCOL", "Online Protocol",
-                       CONNECTION_TAB, IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
-    defineProperty(&OnlineProtocolSelection);
-
-    IUFillText(&URLPathT[0], "URL_PATH", "URL", url.c_str());
-    IUFillTextVector(&URLPathTP, URLPathT, NARRAY(URLPathT), getDeviceName(), "ONLINE_PATH",
-                     "Online Path", CONNECTION_TAB, IP_RW, 0, IPS_IDLE);
-    defineProperty(&URLPathTP);
 
 #ifdef __linux__
     IUFillText(&V4L2SubdevPathT[0], "SUBDEV_PATH", "Sub-device", v4l2_subdev_path.c_str());
@@ -908,9 +809,6 @@ bool indi_qhy_v4l2::initProperties()
     loadConfig(true, OutputFormatSelection.name);
     loadConfig(true, PixelSizeTP.name);
     loadConfig(true, InputOptionsTP.name);
-    loadConfig(true, OnlineInputOptionsP.name);
-    loadConfig(true, URLPathTP.name);
-    loadConfig(true, OnlineProtocolSelection.name);
     loadConfig(true, SaveRawSP.name);
     loadConfig(true, SaveRawPathTP.name);
 #ifdef __linux__
@@ -991,9 +889,6 @@ bool indi_qhy_v4l2::refreshInputSources()
     defineProperty(&FrameRateSelection);
     defineProperty(&PixelFormatSelection);
     defineProperty(&VideoSizeSelection);
-    deleteProperty(OnlineInputOptionsP.name);
-    deleteProperty(OnlineProtocolSelection.name);
-    deleteProperty(URLPathTP.name);
     return true;
 #else
     return false;
@@ -1022,7 +917,7 @@ bool indi_qhy_v4l2::updateProperties()
 
     // Ensure DRIVER_INFO is always visible (for clients that set it)
     defineProperty(&DriverInfoTP);
-    
+
 #ifdef __linux__
     // Publish gain and offset properties after connecting.
     if (isConnected())
@@ -1033,19 +928,19 @@ bool indi_qhy_v4l2::updateProperties()
             GainT[0].min = static_cast<double>(v4l2_subdev_gain_min);
             GainT[0].max = static_cast<double>(v4l2_subdev_gain_max);
             GainT[0].value = static_cast<double>(v4l2_subdev_gain);
-            
+
             OffsetT[0].min = static_cast<double>(v4l2_subdev_offset_min);
             OffsetT[0].max = static_cast<double>(v4l2_subdev_offset_max);
             OffsetT[0].value = static_cast<double>(v4l2_subdev_offset);
-            
+
             defineProperty(&GainTP);
             if (v4l2_offset_supported)
                 defineProperty(&OffsetTP);
             else
                 deleteProperty(OffsetTP.name);
-            
+
             DEBUGF(INDI::Logger::DBG_SESSION, "Published Gain range: %d - %d, Offset range: %d - %d",
-                   v4l2_subdev_gain_min, v4l2_subdev_gain_max, 
+                   v4l2_subdev_gain_min, v4l2_subdev_gain_max,
                    v4l2_subdev_offset_min, v4l2_subdev_offset_max);
         }
         else
@@ -1111,7 +1006,7 @@ bool indi_qhy_v4l2::ISNewNumber (const char *dev, const char *name, double value
         IDSetNumber(&GainTP, nullptr);
         return true;
     }
-    
+
     if (!strcmp(name, OffsetTP.name))
     {
         IUUpdateNumber(&OffsetTP, values, names, n);
@@ -1312,43 +1207,6 @@ bool indi_qhy_v4l2::ISNewSwitch (const char *dev, const char *name, ISState *sta
         return false;
     }
 
-    if (!strcmp(svp->name, OnlineProtocolSelection.name))
-    {
-        IUUpdateSwitch(&OnlineProtocolSelection, states, names, n);
-        ISwitch *sp = IUFindOnSwitch(&OnlineProtocolSelection);
-        if (sp)
-        {
-            if (!strcmp(sp->name, "CUSTOM"))
-            {
-                deleteProperty(OnlineInputOptionsP.name);
-                protocol = "CUSTOM";
-                if(customURL.length() == 0)
-                {
-                    OnlineProtocolSelection.s = IPS_OK;
-                    IDSetSwitch(&OnlineProtocolSelection, nullptr);
-                    return false;
-                }
-                if(ChangeOnlineSource(customURL))
-                {
-                    OnlineProtocolSelection.s = IPS_OK;
-                    IDSetSwitch(&OnlineProtocolSelection, nullptr);
-                    return true;
-                }
-            }
-            else
-            {
-                defineProperty(&OnlineInputOptionsP);
-                if(ChangeOnlineSource(sp->name, IPAddress, port, username, password))
-                {
-                    OnlineProtocolSelection.s = IPS_OK;
-                    IDSetSwitch(&OnlineProtocolSelection, nullptr);
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
     if (!strcmp(svp->name, SaveRawSP.name))
     {
         IUUpdateSwitch(&SaveRawSP, states, names, n);
@@ -1357,7 +1215,7 @@ bool indi_qhy_v4l2::ISNewSwitch (const char *dev, const char *name, ISState *sta
         {
             save_raw_enable = !strcmp(sp->name, "ENABLE");
             SaveRawSP.s = IPS_OK;
-            IDSetSwitch(&SaveRawSP, nullptr);   
+            IDSetSwitch(&SaveRawSP, nullptr);
             return true;
         }
         return false;
@@ -1365,12 +1223,9 @@ bool indi_qhy_v4l2::ISNewSwitch (const char *dev, const char *name, ISState *sta
 
     if (!strcmp(name, RefreshSP.name))
     {
-        if(videoDevice != "IP Camera")
-        {
-            bool a = refreshInputDevices();
-            bool b = refreshInputSources();
-            RefreshSP.s = (a && b) ? IPS_OK : IPS_ALERT;
-        }
+        bool a = refreshInputDevices();
+        bool b = refreshInputSources();
+        RefreshSP.s = (a && b) ? IPS_OK : IPS_ALERT;
         IDSetSwitch(&RefreshSP, nullptr);
         RefreshS[0].s = ISS_OFF;
         return true;
@@ -1406,50 +1261,6 @@ bool indi_qhy_v4l2::ISNewText (const char *dev, const char *name, char *texts[],
             IUSaveText(pixelFormatText, texts[3]);
             IUSaveText(videoSizeText, texts[4]);
             IDSetText (&InputOptionsTP, nullptr);
-            return true;
-        }
-    }
-
-    if (!strcmp(name, OnlineInputOptionsP.name) )
-    {
-        OnlineInputOptionsP.s = IPS_OK;
-
-        IText *IPAddressText = IUFindText( &OnlineInputOptionsP, names[0] );
-        IText *portText = IUFindText( &OnlineInputOptionsP, names[1] );
-        IText *usernameText = IUFindText( &OnlineInputOptionsP, names[2] );
-        IText *passwordText = IUFindText( &OnlineInputOptionsP, names[3] );
-
-        if (!IPAddressText || !portText || !usernameText || !passwordText)
-            return false;
-
-        if(ChangeOnlineSource(protocol, texts[0], texts[1], texts[2], texts[3]))
-        {
-            IUSaveText(IPAddressText, texts[0]);
-            IUSaveText(portText, texts[1]);
-            IUSaveText(usernameText, texts[2]);
-            IUSaveText(passwordText, texts[3]);
-            IDSetText (&OnlineInputOptionsP, nullptr);
-            return true;
-        }
-    }
-
-    if (!strcmp(name, URLPathTP.name) )
-    {
-        URLPathTP.s = IPS_OK;
-
-        IText *URLText = IUFindText( &URLPathTP, names[0] );
-
-        customURL = texts[0];
-        url = texts[0];
-
-        if (!URLText || customURL.length() == 0)
-            return false;
-
-        if(ChangeOnlineSource(customURL))
-        {
-            IUSaveText(URLText, customURL.c_str());
-            IDSetText (&URLPathTP, nullptr);
-            IUFindSwitch(&OnlineProtocolSelection, "CUSTOM")->s = ISS_ON;
             return true;
         }
     }
@@ -1506,9 +1317,9 @@ bool indi_qhy_v4l2::ISNewText (const char *dev, const char *name, char *texts[],
 //It can also set up a series of exposures till the time runs out.
 bool indi_qhy_v4l2::StartExposure(float duration)
 {
-    DEBUGF(INDI::Logger::DBG_SESSION, "StartExposure called with duration=%.3f, use_v4l2_direct=%d, v4l2_streaming=%d", 
+    DEBUGF(INDI::Logger::DBG_SESSION, "StartExposure called with duration=%.3f, use_v4l2_direct=%d, v4l2_streaming=%d",
            duration, use_v4l2_direct, v4l2_streaming);
-    
+
     //If the QHY CCD is currently streaming, it cannot capture single exposures
     if (is_streaming || is_capturing)
     {
@@ -1568,7 +1379,7 @@ bool indi_qhy_v4l2::StartExposure(float duration)
     {
         // Queue every buffer before each STREAMON operation.
         requeueAllV4L2Buffers();
-        DEBUGF(INDI::Logger::DBG_SESSION, "StartExposure: v4l2_streaming flag is %s, v4l2_fd=%d", 
+        DEBUGF(INDI::Logger::DBG_SESSION, "StartExposure: v4l2_streaming flag is %s, v4l2_fd=%d",
                v4l2_streaming ? "true" : "false", v4l2_fd);
         // Start stream - this is the ONLY place where stream should be started for exposure
         if (!v4l2_streaming)
@@ -1576,7 +1387,7 @@ bool indi_qhy_v4l2::StartExposure(float duration)
             enum v4l2_buf_type type = v4l2_is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
             DEBUGF(INDI::Logger::DBG_SESSION, "Calling VIDIOC_STREAMON with fd=%d, type=%d", v4l2_fd, type);
             int ret = ioctl(v4l2_fd, VIDIOC_STREAMON, &type);
-            DEBUGF(INDI::Logger::DBG_SESSION, "VIDIOC_STREAMON returned %d, errno=%d (%s)", 
+            DEBUGF(INDI::Logger::DBG_SESSION, "VIDIOC_STREAMON returned %d, errno=%d (%s)",
                    ret, errno, ret < 0 ? strerror(errno) : "success");
             if (ret < 0)
             {
@@ -1609,7 +1420,7 @@ bool indi_qhy_v4l2::StartExposure(float duration)
             DEBUG(INDI::Logger::DBG_ERROR, "V4L2 stream stopped unexpectedly after flush");
             return false;
         }
-        
+
         // Try to grab an initial frame, but don't fail if it doesn't work
         // TimerHit will continue trying
         bool initialGrabSuccess = false;
@@ -1645,7 +1456,7 @@ bool indi_qhy_v4l2::StartExposure(float duration)
 bool indi_qhy_v4l2::AbortExposure()
 {
     DEBUG(INDI::Logger::DBG_SESSION, "AbortExposure called");
-    
+
     // Stop V4L2 stream if it's running
     if (use_v4l2_direct && v4l2_streaming)
     {
@@ -1661,7 +1472,7 @@ bool indi_qhy_v4l2::AbortExposure()
         // Always reset the flag
         v4l2_streaming = false;
     }
-    
+
     if(stackBuffer)
         free(stackBuffer);
     InExposure = false;
@@ -1757,7 +1568,7 @@ void indi_qhy_v4l2::TimerHit()
 
         timeleft = CalcTimeLeft();
         PrimaryCCD.setExposureLeft(timeleft);
-        
+
         // Try to grab image if stacking is enabled or we haven't got one yet
         if(webcamStacking || !gotAnImageAlready)
         {
@@ -1938,7 +1749,7 @@ void indi_qhy_v4l2::finishExposure()
         DEBUGF(INDI::Logger::DBG_SESSION, "finishExposure: stopping stream, v4l2_fd=%d", v4l2_fd);
         enum v4l2_buf_type type = v4l2_is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
         int ret = ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type);
-        DEBUGF(INDI::Logger::DBG_SESSION, "VIDIOC_STREAMOFF returned %d, errno=%d (%s)", 
+        DEBUGF(INDI::Logger::DBG_SESSION, "VIDIOC_STREAMOFF returned %d, errno=%d (%s)",
                ret, errno, ret < 0 ? strerror(errno) : "success");
         if (ret < 0)
         {
@@ -1949,14 +1760,14 @@ void indi_qhy_v4l2::finishExposure()
             DEBUG(INDI::Logger::DBG_SESSION, "V4L2 stream stopped after exposure");
         }
         v4l2_streaming = false;
-        
+
         // CRITICAL: Delay BEFORE any other operations to ensure driver cleanup
         // Rockchip CIF/MIPI-CSI2 drivers need substantial time to complete cleanup
         // Testing shows 50ms is insufficient, causing next STREAMON to succeed but not start stream
         usleep(200000); // 200ms
         DEBUG(INDI::Logger::DBG_SESSION, "Waited 200ms for driver cleanup");
     }
-    
+
     // Now proceed with image processing and sending
     uint8_t *memptr = PrimaryCCD.getFrameBuffer();
     int w = PrimaryCCD.getXRes();
@@ -2052,7 +1863,7 @@ void indi_qhy_v4l2::finishExposure()
 bool indi_qhy_v4l2::UpdateCCDFrame(int x, int y, int w, int h)
 {
     PrimaryCCD.setFrame(x, y, w, h);
-    
+
     // If using V4L2 direct and crop is supported, set hardware crop
     if (use_v4l2_direct && v4l2_can_crop)
     {
@@ -2064,7 +1875,7 @@ bool indi_qhy_v4l2::UpdateCCDFrame(int x, int y, int w, int h)
             ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type);
             v4l2_streaming = false;
         }
-        
+
         // Set crop rectangle
         if (setV4L2Crop(x, y, w, h))
         {
@@ -2072,7 +1883,7 @@ bool indi_qhy_v4l2::UpdateCCDFrame(int x, int y, int w, int h)
             struct v4l2_rect crop_rect = getV4L2Crop();
             PrimaryCCD.setFrame(crop_rect.left, crop_rect.top, crop_rect.width, crop_rect.height);
         }
-        
+
         // Restart streaming if it was active
         if (was_streaming)
         {
@@ -2081,7 +1892,7 @@ bool indi_qhy_v4l2::UpdateCCDFrame(int x, int y, int w, int h)
                 v4l2_streaming = true;
         }
     }
-    
+
     return true;
 }
 
@@ -2296,30 +2107,36 @@ bool indi_qhy_v4l2::ConnectToSourceV4L2(std::string source)
         return false;
     }
 
-    // Disable Rockchip CIF compact mode to prevent image stitching issues
-    // This must be done before setting up the device format
-    // Try common Rockchip CIF device paths
-    const char* compact_test_paths[] = {
-        "/sys/devices/platform/rkcif-mipi-lvds1/compact_test",
-        "/sys/devices/platform/rkcif-mipi-lvds/compact_test",
-        "/sys/devices/platform/rkcif/compact_test",
-        nullptr
-    };
-    
-    for (int i = 0; compact_test_paths[i] != nullptr; i++)
+    // Disable an optional capture-pipeline compact mode before negotiating the format.
+    // The control is discovered relative to the selected video node, so no board
+    // or fixed video-node path is required. Devices without this optional control
+    // continue without any special handling.
+    const std::string videoName = source.substr(source.find_last_of('/') + 1);
+    const std::string sysfsDevice = "/sys/class/video4linux/" + videoName + "/device";
+    char resolvedDevice[PATH_MAX] {};
+    if (realpath(sysfsDevice.c_str(), resolvedDevice) != nullptr)
     {
-        FILE *fp = fopen(compact_test_paths[i], "w");
-        if (fp)
+        std::string parent = resolvedDevice;
+        for (int level = 0; level < 16 && parent.rfind("/sys/", 0) == 0; ++level)
         {
-            // Write "0 0 0 0" to disable compact mode
-            if (fprintf(fp, "0 0 0 0") >= 0)
+            const std::string compactControl = parent + "/compact_test";
+            FILE *fp = fopen(compactControl.c_str(), "w");
+            if (fp)
             {
-                DEBUGF(INDI::Logger::DBG_SESSION, "Disabled Rockchip CIF compact mode via %s", compact_test_paths[i]);
+                if (fprintf(fp, "0 0 0 0") >= 0)
+                    DEBUGF(INDI::Logger::DBG_SESSION,
+                           "Disabled optional compact capture mode via %s",
+                           compactControl.c_str());
+                fclose(fp);
+                break;
             }
-            fclose(fp);
+
+            const size_t slash = parent.find_last_of('/');
+            if (slash == std::string::npos || slash <= 4)
+                break;
+            parent.resize(slash);
         }
     }
-    // Not a critical error if we can't find the file - device might not be Rockchip
 
     struct v4l2_capability cap = {};
     if (ioctl(v4l2_fd, VIDIOC_QUERYCAP, &cap) < 0)
@@ -2494,7 +2311,7 @@ bool indi_qhy_v4l2::ConnectToSourceV4L2(std::string source)
     v4l2_streaming = false;
     use_v4l2_direct = true;
     videoSource = source;
-    
+
     // Check crop capabilities
     v4l2_cropcap.type = v4l2_is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
     v4l2_can_crop = (ioctl(v4l2_fd, VIDIOC_CROPCAP, &v4l2_cropcap) == 0);
@@ -2504,23 +2321,23 @@ bool indi_qhy_v4l2::ConnectToSourceV4L2(std::string source)
         v4l2_crop.c = v4l2_cropcap.defrect;
         ioctl(v4l2_fd, VIDIOC_S_CROP, &v4l2_crop);
         DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 Crop capabilities: bounds=(%d,%d,%d,%d) defrect=(%d,%d,%d,%d)",
-               v4l2_cropcap.bounds.left, v4l2_cropcap.bounds.top, 
+               v4l2_cropcap.bounds.left, v4l2_cropcap.bounds.top,
                v4l2_cropcap.bounds.width, v4l2_cropcap.bounds.height,
                v4l2_cropcap.defrect.left, v4l2_cropcap.defrect.top,
                v4l2_cropcap.defrect.width, v4l2_cropcap.defrect.height);
     }
-    
+
     // Enumerate device capabilities (for debugging and information)
     enumerateV4L2Formats();
     enumerateV4L2Sizes();
     enumerateV4L2FrameRates();
-    
+
 #ifdef __linux__
     if (openV4L2Subdevice())
     {
         updateV4L2SubdevExposureRange();
         setV4L2Exposure(v4l2_subdev_exposure);
-        
+
         updateV4L2GainRange();
         getV4L2Gain(&v4l2_subdev_gain);
         updateV4L2OffsetRange();
@@ -2609,15 +2426,15 @@ bool indi_qhy_v4l2::setupV4L2Streaming()
         DEBUG(INDI::Logger::DBG_SESSION, "V4L2 file descriptor invalid in setupV4L2Streaming");
         return false;
     }
-    
+
     // Ensure mmap buffers are still valid (they should be, but check anyway)
     if (!v4l2_buffers || !v4l2_mmap_ptrs || v4l2_buffer_count == 0)
     {
-        DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 buffers not initialized: buffers=%p, mmap_ptrs=%p, count=%u", 
+        DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 buffers not initialized: buffers=%p, mmap_ptrs=%p, count=%u",
                v4l2_buffers, v4l2_mmap_ptrs, v4l2_buffer_count);
         return false;
     }
-    
+
     int w = v4l2_is_mplane ? (int)v4l2_fmt.fmt.pix_mp.width : (int)v4l2_fmt.fmt.pix.width;
     int h = v4l2_is_mplane ? (int)v4l2_fmt.fmt.pix_mp.height : (int)v4l2_fmt.fmt.pix.height;
     uint32_t fourcc = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.pixelformat : v4l2_fmt.fmt.pix.pixelformat;
@@ -2645,7 +2462,7 @@ bool indi_qhy_v4l2::setupV4L2Streaming()
             return false;
         }
     }
-    
+
     // Only allocate buffer if not already allocated or size changed
     if (!buffer || PrimaryCCD.getFrameBufferSize() != numBytes)
     {
@@ -2655,13 +2472,13 @@ bool indi_qhy_v4l2::setupV4L2Streaming()
         if (!buffer)
             return false;
     }
-    
+
     PrimaryCCD.setFrameBufferSize(numBytes);
     PrimaryCCD.setResolution(w, h);
-    
+
     // DO NOT start stream here - it will be started explicitly in StartExposure()
     // This function only sets up buffers and parameters
-    
+
     return true;
 }
 
@@ -2669,7 +2486,7 @@ bool indi_qhy_v4l2::getStreamFrameV4L2()
 {
     if (v4l2_fd < 0)
         return false;
-    
+
     // Stream should already be running when this is called during exposure
     // Do NOT start stream here
     if (!v4l2_streaming)
@@ -2677,7 +2494,7 @@ bool indi_qhy_v4l2::getStreamFrameV4L2()
         DEBUG(INDI::Logger::DBG_DEBUG, "getStreamFrameV4L2 called but stream not running");
         return false;
     }
-    
+
     fd_set fds;
     FD_ZERO(&fds);
     FD_SET(v4l2_fd, &fds);
@@ -2837,7 +2654,7 @@ bool indi_qhy_v4l2::flush_frame_bufferV4L2()
 {
     if (v4l2_fd < 0)
         return true;
-    
+
     // This function should only be called when stream is already running
     // Do NOT start stream here - it should be started in StartExposure before calling this
     if (!v4l2_streaming)
@@ -2845,7 +2662,7 @@ bool indi_qhy_v4l2::flush_frame_bufferV4L2()
         DEBUG(INDI::Logger::DBG_DEBUG, "flush_frame_bufferV4L2 called but stream not running, skipping flush");
         return true; // Not an error, just nothing to flush
     }
-    
+
     int cleared = 0;
     int max_clear = 10; // Limit number of frames to clear to avoid infinite loop
     while (cleared < max_clear)
@@ -2860,7 +2677,7 @@ bool indi_qhy_v4l2::flush_frame_bufferV4L2()
             buf.length = 1;
             buf.m.planes = planes;
         }
-        
+
         // Use select with timeout to avoid blocking
         fd_set fds;
         FD_ZERO(&fds);
@@ -2869,7 +2686,7 @@ bool indi_qhy_v4l2::flush_frame_bufferV4L2()
         int r = select(v4l2_fd + 1, &fds, nullptr, nullptr, &tv);
         if (r <= 0)
             break; // No data available or timeout
-        
+
         if (ioctl(v4l2_fd, VIDIOC_DQBUF, &buf) < 0)
         {
             if (errno == EAGAIN)
@@ -2878,7 +2695,7 @@ bool indi_qhy_v4l2::flush_frame_bufferV4L2()
             DEBUGF(INDI::Logger::DBG_DEBUG, "VIDIOC_DQBUF failed in flush: %s", strerror(errno));
             break;
         }
-        
+
         if (v4l2_is_mplane)
         {
             buf.m.planes = planes;
@@ -2991,11 +2808,11 @@ bool indi_qhy_v4l2::enumerateV4L2Formats()
 {
     if (v4l2_fd < 0)
         return false;
-    
+
     struct v4l2_fmtdesc fmt_desc;
     memset(&fmt_desc, 0, sizeof(fmt_desc));
     fmt_desc.type = v4l2_is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    
+
     DEBUG(INDI::Logger::DBG_SESSION, "V4L2 Supported Formats:");
     for (fmt_desc.index = 0; ioctl(v4l2_fd, VIDIOC_ENUM_FMT, &fmt_desc) == 0; fmt_desc.index++)
     {
@@ -3014,11 +2831,11 @@ bool indi_qhy_v4l2::enumerateV4L2Sizes()
 {
     if (v4l2_fd < 0)
         return false;
-    
+
     struct v4l2_frmsizeenum frm_size;
     memset(&frm_size, 0, sizeof(frm_size));
     frm_size.pixel_format = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.pixelformat : v4l2_fmt.fmt.pix.pixelformat;
-    
+
     DEBUG(INDI::Logger::DBG_SESSION, "V4L2 Supported Sizes:");
     for (frm_size.index = 0; ioctl(v4l2_fd, VIDIOC_ENUM_FRAMESIZES, &frm_size) == 0; frm_size.index++)
     {
@@ -3048,13 +2865,13 @@ bool indi_qhy_v4l2::enumerateV4L2FrameRates()
 {
     if (v4l2_fd < 0)
         return false;
-    
+
     struct v4l2_frmivalenum frm_ival;
     memset(&frm_ival, 0, sizeof(frm_ival));
     frm_ival.pixel_format = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.pixelformat : v4l2_fmt.fmt.pix.pixelformat;
     frm_ival.width = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.width : v4l2_fmt.fmt.pix.width;
     frm_ival.height = v4l2_is_mplane ? v4l2_fmt.fmt.pix_mp.height : v4l2_fmt.fmt.pix.height;
-    
+
     DEBUG(INDI::Logger::DBG_SESSION, "V4L2 Supported Frame Rates:");
     for (frm_ival.index = 0; ioctl(v4l2_fd, VIDIOC_ENUM_FRAMEINTERVALS, &frm_ival) == 0; frm_ival.index++)
     {
@@ -3085,19 +2902,19 @@ bool indi_qhy_v4l2::setV4L2Format(uint32_t pixelformat)
 {
     if (v4l2_fd < 0 || v4l2_streaming)
         return false;
-    
+
     struct v4l2_format new_fmt = v4l2_fmt;
     if (v4l2_is_mplane)
         new_fmt.fmt.pix_mp.pixelformat = pixelformat;
     else
         new_fmt.fmt.pix.pixelformat = pixelformat;
-    
+
     if (ioctl(v4l2_fd, VIDIOC_S_FMT, &new_fmt) < 0)
     {
         DEBUGF(INDI::Logger::DBG_SESSION, "Failed to set V4L2 format: %s", strerror(errno));
         return false;
     }
-    
+
     v4l2_fmt = new_fmt;
     DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 format set to 0x%08x", pixelformat);
     return true;
@@ -3108,7 +2925,7 @@ bool indi_qhy_v4l2::setV4L2Size(unsigned int width, unsigned int height)
 {
     if (v4l2_fd < 0 || v4l2_streaming)
         return false;
-    
+
     struct v4l2_format new_fmt = v4l2_fmt;
     if (v4l2_is_mplane)
     {
@@ -3122,13 +2939,13 @@ bool indi_qhy_v4l2::setV4L2Size(unsigned int width, unsigned int height)
         new_fmt.fmt.pix.width = width;
         new_fmt.fmt.pix.height = height;
     }
-    
+
     if (ioctl(v4l2_fd, VIDIOC_S_FMT, &new_fmt) < 0)
     {
         DEBUGF(INDI::Logger::DBG_SESSION, "Failed to set V4L2 size: %s", strerror(errno));
         return false;
     }
-    
+
     v4l2_fmt = new_fmt;
     DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 size set to %ux%u", width, height);
     return true;
@@ -3139,17 +2956,17 @@ bool indi_qhy_v4l2::setV4L2FrameRate(unsigned int numerator, unsigned int denomi
 {
     if (v4l2_fd < 0)
         return false;
-    
+
     struct v4l2_streamparm parm;
     memset(&parm, 0, sizeof(parm));
     parm.type = v4l2_is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    
+
     if (ioctl(v4l2_fd, VIDIOC_G_PARM, &parm) < 0)
     {
         DEBUGF(INDI::Logger::DBG_SESSION, "VIDIOC_G_PARM failed: %s", strerror(errno));
         return false;
     }
-    
+
     if (v4l2_is_mplane)
     {
         parm.parm.capture.timeperframe.numerator = numerator;
@@ -3160,13 +2977,13 @@ bool indi_qhy_v4l2::setV4L2FrameRate(unsigned int numerator, unsigned int denomi
         parm.parm.capture.timeperframe.numerator = numerator;
         parm.parm.capture.timeperframe.denominator = denominator;
     }
-    
+
     if (ioctl(v4l2_fd, VIDIOC_S_PARM, &parm) < 0)
     {
         DEBUGF(INDI::Logger::DBG_SESSION, "Failed to set V4L2 frame rate: %s", strerror(errno));
         return false;
     }
-    
+
     DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 frame rate set to %u/%u", numerator, denominator);
     return true;
 }
@@ -3205,17 +3022,17 @@ bool indi_qhy_v4l2::queryV4L2Control(unsigned int ctrl_id, struct v4l2_queryctrl
 {
     if (v4l2_fd < 0 || !queryctrl)
         return false;
-    
+
     memset(queryctrl, 0, sizeof(*queryctrl));
     queryctrl->id = ctrl_id;
-    
+
     if (ioctl(v4l2_fd, VIDIOC_QUERYCTRL, queryctrl) < 0)
     {
         if (errno != EINVAL)
             DEBUGF(INDI::Logger::DBG_SESSION, "VIDIOC_QUERYCTRL failed for 0x%08x: %s", ctrl_id, strerror(errno));
         return false;
     }
-    
+
     return true;
 }
 
@@ -3224,18 +3041,18 @@ bool indi_qhy_v4l2::setV4L2Control(unsigned int ctrl_id, int32_t value)
 {
     if (v4l2_fd < 0)
         return false;
-    
+
     struct v4l2_control ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.id = ctrl_id;
     ctrl.value = value;
-    
+
     if (ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl) < 0)
     {
         DEBUGF(INDI::Logger::DBG_SESSION, "Failed to set V4L2 control 0x%08x: %s", ctrl_id, strerror(errno));
         return false;
     }
-    
+
     return true;
 }
 
@@ -3244,17 +3061,17 @@ bool indi_qhy_v4l2::getV4L2Control(unsigned int ctrl_id, int32_t *value)
 {
     if (v4l2_fd < 0 || !value)
         return false;
-    
+
     struct v4l2_control ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.id = ctrl_id;
-    
+
     if (ioctl(v4l2_fd, VIDIOC_G_CTRL, &ctrl) < 0)
     {
         DEBUGF(INDI::Logger::DBG_SESSION, "Failed to get V4L2 control 0x%08x: %s", ctrl_id, strerror(errno));
         return false;
     }
-    
+
     *value = ctrl.value;
     return true;
 }
@@ -3398,19 +3215,19 @@ bool indi_qhy_v4l2::setV4L2Crop(int x, int y, int w, int h)
 {
     if (v4l2_fd < 0 || !v4l2_can_crop)
         return false;
-    
+
     v4l2_crop.type = v4l2_is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
     v4l2_crop.c.left = x;
     v4l2_crop.c.top = y;
     v4l2_crop.c.width = w;
     v4l2_crop.c.height = h;
-    
+
     if (ioctl(v4l2_fd, VIDIOC_S_CROP, &v4l2_crop) < 0)
     {
         DEBUGF(INDI::Logger::DBG_SESSION, "Failed to set V4L2 crop: %s", strerror(errno));
         return false;
     }
-    
+
     DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 crop set to (%d,%d) %dx%d", x, y, w, h);
     return true;
 }
@@ -3419,14 +3236,14 @@ bool indi_qhy_v4l2::setV4L2Crop(int x, int y, int w, int h)
 struct v4l2_rect indi_qhy_v4l2::getV4L2Crop()
 {
     struct v4l2_rect rect = {0, 0, 0, 0};
-    
+
     if (v4l2_fd < 0 || !v4l2_can_crop)
         return rect;
-    
+
     v4l2_crop.type = v4l2_is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(v4l2_fd, VIDIOC_G_CROP, &v4l2_crop) == 0)
         rect = v4l2_crop.c;
-    
+
     return rect;
 }
 #endif
@@ -3479,11 +3296,8 @@ bool indi_qhy_v4l2::saveConfigItems(FILE *fp)
     IUSaveConfigSwitch(fp, &CaptureDeviceSelection);
     IUSaveConfigSwitch(fp, &RapidStackingSelection);
     IUSaveConfigSwitch(fp, &OutputFormatSelection);
-    IUSaveConfigSwitch(fp, &OnlineProtocolSelection);
     IUSaveConfigNumber(fp, &PixelSizeTP);
     IUSaveConfigText(fp, &InputOptionsTP);
-    IUSaveConfigText(fp, &OnlineInputOptionsP);
-    IUSaveConfigText(fp, &URLPathTP);
     IUSaveConfigNumber(fp, &TimeoutOptionsTP);
 #ifdef __linux__
     IUSaveConfigText(fp, &V4L2SubdevPathTP);
@@ -3515,7 +3329,7 @@ void indi_qhy_v4l2::updateV4L2GainRange()
         if (v4l2_subdev_gain > v4l2_subdev_gain_max)
             v4l2_subdev_gain = v4l2_subdev_gain_max;
 
-        DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 subdev gain range updated: %d - %d (current: %d)", 
+        DEBUGF(INDI::Logger::DBG_SESSION, "V4L2 subdev gain range updated: %d - %d (current: %d)",
                v4l2_subdev_gain_min, v4l2_subdev_gain_max, v4l2_subdev_gain);
     }
     else
