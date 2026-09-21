@@ -335,3 +335,44 @@
   - 构建产物和/usr/bin/indi_qhy_ccd的ldd均未发现libavcodec、libavdevice、libavformat、libavutil或libswscale。
   - 独立端口indiserver冒烟启动成功，并发现QHY CCD QHY26800A Guide（/dev/video11、/dev/v4l-subdev3）。
   - v4l2-ctl对/dev/video11单帧采集成功，生成4147200字节原始帧。
+
+## 2026-09-21 11:37
+- 修改目标：彻底清理整合版 indi_qhy_v4l2 中残留的 FFmpeg 旧实现。
+- 修改文件：
+  - indi-qhy/indi_qhy_v4l2.cpp
+  - indi-qhy/indi_qhy_v4l2.h
+  - /usr/bin/indi_qhy_ccd
+  - WORKLOG.md
+  - backups/20260921_before_ffmpeg_deadcode_cleanup/（修改前源码、CMake、工作日志和已安装程序备份）
+- 修改原因与内容：
+  - 删除 7 个由 #if 0 禁用的 FFmpeg/AVFoundation/LibAV/SWS 旧代码块，共清理 cpp 约 613 行。
+  - 删除仅供旧 AVFoundation 回调使用的全局变量及过期注释；保留文件头中的来源说明。
+  - V4L2 ioctl、mmap、媒体拓扑发现、曝光、增益、偏置和原生 QHY SDK 路径未改动。
+- 影响范围：
+  - indi_qhy_ccd 仅保留原生 V4L2 Direct 采集后端；不再含可重新启用的 FFmpeg 后端死代码。
+  - 独立 indi-webcam 工程未修改。
+- 验证结果：
+  - indi_qhy_ccd clean-first 重新编译和链接成功，仅有既有 libindi 弃用警告。
+  - 源码未检出 LibAV、SWS、AV 对象、dlopen/dlsym 或 #if 0 残留；文件头仅保留来源说明。
+  - ldd、readelf、nm 和 strings 均未检出 FFmpeg 库、符号或二进制字符串。
+  - 构建产物与 /usr/bin/indi_qhy_ccd SHA-256 一致，quarcs-client.service 为 active。
+  - 独立 indiserver 冒烟测试因板端已有 indiserver 实例占用本地服务资源未完成，不影响编译和依赖验证。
+
+## 2026-09-21 12:29
+- 修改目标：统一 indi_qhy_v4l2 有效源码中的注释语言。
+- 修改文件：
+  - indi-qhy/indi_qhy_v4l2.cpp
+  - indi-qhy/indi_qhy_v4l2.h
+  - /usr/bin/indi_qhy_ccd
+  - WORKLOG.md
+  - backups/20260921_before_english_comment_cleanup/（修改前源码、工作日志和已安装程序备份）
+- 修改原因与内容：
+  - 将曝光同步、缓冲入队、RAW stride、动态设备范围、媒体拓扑和 V4L2 控件等必要中文注释翻译为英文。
+  - 删除与函数名或代码行为重复的中文注释；未修改任何功能语句、参数或控制流程。
+- 影响范围：
+  - 仅影响 indi_qhy_v4l2.cpp 和 indi_qhy_v4l2.h 的注释及生成程序中的调试行号；采集和控制逻辑不变。
+- 验证结果：
+  - 两个有效源码文件的中文字符扫描结果为空。
+  - indi_qhy_ccd clean-first 编译和链接成功，仅有既有 libindi 弃用警告。
+  - 新程序已安装，构建产物与 /usr/bin/indi_qhy_ccd SHA-256 一致，quarcs-client.service 为 active。
+  - FFmpeg 依赖回归检查仍为空。

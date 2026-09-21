@@ -40,14 +40,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <string.h>
 #include <errno.h>
 
-//These are required to check for AVFoundation Devices
-//The reason is that we have to print and parse the output
-//These can't be in indi_qhy_v4l2 class declaration because the callback method has to be passed to FFMpeg
-//We need access to these variables in the callback method
-std::vector<std::string> listOfSources;
-bool connectedOnce = false;
-bool allDevicesFound = false;
-bool checkingDevices = false;
 
 class indi_qhy_v4l2 : public INDI::CCD
 {
@@ -85,7 +77,7 @@ protected:
 
     bool UpdateCCDFrame(int x, int y, int w, int h) override;
     
-    // 增益和偏移量控制（自定义实现，不覆盖基类）
+    // Custom gain and offset controls; these do not override base-class methods.
     bool SetCCDGain(double gain);
     bool SetCCDOffset(double offset);
 
@@ -182,7 +174,7 @@ private:
     ISwitchVectorProperty RapidStackingSelection;
     ISwitch *OutputFormats = nullptr;
     ISwitchVectorProperty OutputFormatSelection;
-    // 16位字节序修正
+    // Optional 16-bit byte-order correction.
     ISwitch *EndianFix = nullptr;
     ISwitchVectorProperty EndianFixSelection;
     bool swap16_on_send = false;
@@ -195,9 +187,9 @@ private:
     INumberVectorProperty PixelSizeTP;
     INumber VideoAdjustmentsT[3] {};
     INumberVectorProperty VideoAdjustmentsTP;
-    // V4L2SubdevExposure UI属性已移除，曝光由上位机通过 CCD_EXPOSURE 控制
+    // Exposure is controlled by the client through CCD_EXPOSURE.
     
-    // V4L2 增益和偏移量属性（手动定义）
+    // V4L2 gain and offset properties.
     INumber GainT[1] {};
     INumberVectorProperty GainTP;
     INumber OffsetT[1] {};
@@ -223,28 +215,28 @@ private:
     int numBytes = 0;
 
     // V4L2 direct access for Multiplanar devices
-    bool use_v4l2_direct = false;                    // 标志：是否使用 V4L2 直接模式
-    int v4l2_fd = -1;                               // V4L2 video节点设备文件描述符
-    struct v4l2_format v4l2_fmt;                     // V4L2 格式结构体
-    struct v4l2_buffer *v4l2_buffers = nullptr;     // V4L2 缓冲区数组
-    unsigned int v4l2_buffer_count = 0;             // V4L2 缓冲区数量
-    bool v4l2_streaming = false;                    // V4L2 流状态
-    bool v4l2_is_mplane = false;                    // V4L2 是否为多平面模式
-    void **v4l2_mmap_ptrs = nullptr;                // V4L2 内存映射指针数组
-    size_t *v4l2_mmap_lens = nullptr;               // V4L2 内存映射长度数组
-    bool v4l2_force_16bit = false;                  // V4L2 是否强制 16 位
-    std::string v4l2_subdev_path;                  // 由设备树/媒体拓扑动态发现
-    double v4l2_subdev_exposure = 10000.0;           // 子设备曝光时间
-    int v4l2_subdev_fd = -1;                         // 子设备文件描述符
-    double v4l2_subdev_exposure_min = 1.0;          // 子设备最小曝光时间（100微秒单位）
-    double v4l2_subdev_exposure_max = 100000.0;      // 子设备最大曝光时间（100微秒单位）
+    bool use_v4l2_direct = false;
+    int v4l2_fd = -1;
+    struct v4l2_format v4l2_fmt;
+    struct v4l2_buffer *v4l2_buffers = nullptr;
+    unsigned int v4l2_buffer_count = 0;
+    bool v4l2_streaming = false;
+    bool v4l2_is_mplane = false;                    // Selects the multi-planar capture API.
+    void **v4l2_mmap_ptrs = nullptr;
+    size_t *v4l2_mmap_lens = nullptr;
+    bool v4l2_force_16bit = false;                  // Forces output through a 16-bit container.
+    std::string v4l2_subdev_path;                   // Discovered from the device tree and media topology.
+    double v4l2_subdev_exposure = 10000.0;          // Exposure in 100 microsecond units.
+    int v4l2_subdev_fd = -1;
+    double v4l2_subdev_exposure_min = 1.0;          // Minimum exposure in 100 microsecond units.
+    double v4l2_subdev_exposure_max = 100000.0;     // Maximum exposure in 100 microsecond units.
     
-    // V4L2 增益和偏移量控制
-    int32_t v4l2_subdev_gain = 64;                  // 模拟增益值（默认64）
-    int32_t v4l2_subdev_gain_min = 64;              // 最小增益
-    int32_t v4l2_subdev_gain_max = 90112;           // 最大增益
-    int32_t v4l2_subdev_offset = 0;                 // 偏移量值（通过 V4L2 控件设置）
-    int32_t v4l2_subdev_offset_min = 0;             // 最小偏移量
+    // V4L2 gain and offset controls.
+    int32_t v4l2_subdev_gain = 64;
+    int32_t v4l2_subdev_gain_min = 64;
+    int32_t v4l2_subdev_gain_max = 90112;
+    int32_t v4l2_subdev_offset = 0;                 // Uses the standard V4L2 black-level control.
+    int32_t v4l2_subdev_offset_min = 0;
     int32_t v4l2_subdev_offset_max = 0;
     int32_t v4l2_subdev_offset_step = 1;
     uint32_t v4l2_subdev_offset_control_id = V4L2_CID_BLACK_LEVEL;
@@ -252,7 +244,7 @@ private:
 
     // Optional raw save after exposure
     bool save_raw_enable = true;
-    std::string save_raw_path = "/tmp/indi_qhy_v4l2.raw";  //将indi采集到的原始数据保存到文件中
+    std::string save_raw_path = "/tmp/indi_qhy_v4l2.raw";  // Destination for captured raw frames.
     IText SaveRawPathT[1] {};
     ITextVectorProperty SaveRawPathTP;
     ISwitch SaveRawS[1] {};
@@ -287,21 +279,20 @@ private:
     void updateV4L2SubdevExposureRange();
     void syncV4L2ExposureFromDuration(double duration);
     
-    // 增益和偏移量控制函数
-    bool setV4L2Gain(int32_t gain);                     // 设置模拟增益
-    bool getV4L2Gain(int32_t *gain);                    // 获取当前增益
-    void updateV4L2GainRange();                         // 更新增益范围
-    bool setV4L2Offset(int32_t offset);                 // 设置偏移量（通过 V4L2 控件）
-    bool getV4L2Offset(int32_t *offset);                // 获取当前偏移量
-    void updateV4L2OffsetRange();                       // 查询标准黑电平控件
-    void updateV4L2ImageMetadata();                     // 根据 FOURCC 更新位深和 Bayer
+    bool setV4L2Gain(int32_t gain);
+    bool getV4L2Gain(int32_t *gain);
+    void updateV4L2GainRange();
+    bool setV4L2Offset(int32_t offset);
+    bool getV4L2Offset(int32_t *offset);
+    void updateV4L2OffsetRange();                       // Queries the standard black-level control.
+    void updateV4L2ImageMetadata();                     // Updates bit depth and Bayer metadata from FOURCC.
     
     bool setV4L2Crop(int x, int y, int w, int h);
     struct v4l2_rect getV4L2Crop();
     bool v4l2_can_crop = false;
     struct v4l2_cropcap v4l2_cropcap;
     struct v4l2_crop v4l2_crop;
-    // 确保在每次 STREAMON 前缓冲区已全部入队
+    // Queue all buffers before every STREAMON operation.
     bool requeueAllV4L2Buffers();
 
 };

@@ -457,115 +457,6 @@ V4L2CameraLoader qhyV4L2CameraLoader;
 static std::unique_ptr<indi_qhy_v4l2> qhy_v4l2(new indi_qhy_v4l2());
 #endif
 
-//Note this is how we get information about AVFoundation Devices
-//FFMpeg does not provide a way to programmatically get them, but there is a way to log them.
-//So we capture the logging and parse it to get the list of devices.
-//This is the function FFMpeg calls.
-#if 0
-void logDevices(void *ptr, int level, const char *fmt, va_list vargs)
-{
-    int printPrefix = 1;
-    int lineSize = 1024;
-    char *lineBuffer = (char *)malloc(1024);
-    av_log_format_line(ptr, level, fmt, vargs, lineBuffer, lineSize, &printPrefix);
-    if(checkingDevices)
-    {
-        if(allDevicesFound)
-        {
-            if(lineBuffer)
-                free(lineBuffer);
-            return;
-        }
-        if(strstr(lineBuffer, "AVFoundation video devices:") != nullptr)
-        {
-            if(lineBuffer)
-                free(lineBuffer);
-            return;
-        }
-        if(strstr(lineBuffer, "AVFoundation audio devices:") != nullptr)
-        {
-            allDevicesFound = true;
-            if(lineBuffer)
-                free(lineBuffer);
-            return;
-        }
-        std::string line = lineBuffer;
-
-        // This will remove the avfoundation label and hashcode and just leave the number in brackets and device name
-        std::string device = line.substr(line.find_first_of("]") + 2);
-        listOfSources.push_back(device);
-    }
-    else
-    {
-        if(av_log_get_level() >= level)
-            fprintf(stderr, "%s", lineBuffer);
-    }
-    if(lineBuffer)
-        free(lineBuffer);
-}
-
-//This method finds AVFoundation Devices.  Please see description above.
-void indi_qhy_v4l2::findAVFoundationVideoSources()
-{
-    //Need to disconnect streaming if it is running
-    bool was_streaming = false;
-    if(is_streaming)
-    {
-        was_streaming = true;
-        StopStreaming();
-    }
-
-    //Need to disconnect the source to probe the streams
-    if(isConnected())
-    {
-        avcodec_close(pCodecCtx);
-        avformat_close_input(&pFormatCtx);
-    }
-    else
-    {
-        //This appears to be needed for the list to get updated if a device was not connected
-        //But it is fine to do without this the first time, so it isn't done in that case.
-        if(!connectedOnce)
-            connectedOnce = true;
-        else
-        {
-            DEBUG(INDI::Logger::DBG_SESSION, "Briefly connecting to avfoundation to update the source list");
-            if(ConnectToSource("avfoundation", "default", frameRate, videoSize, inputPixelFormat, "Not using IP Camera"))
-                DEBUG(INDI::Logger::DBG_SESSION, "Source List Updated");
-            avcodec_close(pCodecCtx);
-            avformat_close_input(&pFormatCtx);
-        }
-    }
-
-    listOfSources.clear();
-    allDevicesFound = false;
-    checkingDevices = true;
-
-    //This is how we tell FFMpeg to call our method to log the sources.
-    av_log_set_callback(logDevices);
-
-    //This set of commands should open the avfoundation device to list its sources
-    AVDictionary* options = nullptr;
-    av_dict_set(&options, "list_devices", "true", 0);
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 0, 100)
-    AVInputFormat *iformat = av_find_input_format("avfoundation");
-#else
-    const AVInputFormat *iformat = av_find_input_format("avfoundation");
-#endif
-    avformat_open_input(&pFormatCtx, "", iformat, &options);
-    avformat_close_input(&pFormatCtx);
-    checkingDevices = false;
-
-    //Need to hook back up the source if it should be connected
-    if(isConnected())
-        ConnectToSource(videoDevice, videoSource, frameRate, videoSize, inputPixelFormat, url);
-
-    //Hook back up streaming if it should be running
-    if(was_streaming)
-        StartStreaming();
-}
-
-#endif
 
 indi_qhy_v4l2::indi_qhy_v4l2(const std::string &name, const std::string &videoPath,
                              const std::string &subdevPath, const std::string &role,
@@ -623,115 +514,6 @@ bool indi_qhy_v4l2::Connect()
 }
 
 // V4L2 is the only supported capture backend on Linux.
-#if 0
-bool indi_qhy_v4l2::ConnectToSource(std::string device, std::string source, int framerate, std::string videosize, std::string inputpixelformat,
-                                  std::string urlSource)
-{
-    // Direct V4L2 path without FFMPEG
-#ifdef __linux__
-    if (device == QHY_V4L2_DIRECT_DEVICE || source.rfind("/dev/video", 0) == 0)
-    {
-        if (isConnected())
-            DisconnectV4L2();
-        if (!ConnectToSourceV4L2(source))
-            return false;
-
-        updateV4L2ImageMetadata();
-        DEBUG(INDI::Logger::DBG_SESSION, "Connection Successful (V4L2 Direct).");
-        return true;
-    }
-#endif
-    char stringFrameRate[16];
-    snprintf(stringFrameRate, 16, "%u", framerate);
-    char stringffmpegTimeout[16];
-    snprintf(stringffmpegTimeout, 16, "%.0f", ffmpegTimeout);
-    if(isConnected())
-    {
-        avcodec_close(pCodecCtx);
-        avformat_close_input(&pFormatCtx);
-    }
-
-    AVDictionary* options = nullptr;
-    av_dict_set(&options, "timeout", stringffmpegTimeout, 0); //Timeout for open_input and for read_frame.  VERY important.
-
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 0, 100)
-    AVInputFormat *iformat = nullptr;
-#else
-    const AVInputFormat *iformat = nullptr;
-#endif
-
-    if(device != "IP Camera")
-    {
-        //These items are not used by an IP Camera
-        av_dict_set(&options, "framerate", stringFrameRate, 0);
-        av_dict_set(&options, "video_size", videosize.c_str(), 0);
-        av_dict_set(&options, "pixel_format", inputpixelformat.c_str(), 0);
-        iformat = av_find_input_format(device.c_str());
-    }
-    DEBUG(INDI::Logger::DBG_SESSION, "Attempting to connect");
-
-    //This opens the input to get it ready for streaming.
-    //Warning:  It is possible for the avformat_open_input command to hang if the camera is there and does not respond.
-    //I have not yet solved this problem.  It does not happen often.
-    int connect = -1;
-    if(device == "IP Camera")
-        connect = avformat_open_input(&pFormatCtx, urlSource.c_str(), nullptr, &options );
-    else
-        connect = avformat_open_input(&pFormatCtx, source.c_str(), iformat, &options );
-    if (connect != 0)
-    {
-        char errbuff[200];
-        av_make_error_string(errbuff, 200, connect);
-        DEBUGF(INDI::Logger::DBG_SESSION, "Failed to open source. Check your settings: %s", errbuff);
-        return false;
-    }
-
-    //pFormatCtx->max_analyze_duration = 10000000;
-
-    if (avformat_find_stream_info(pFormatCtx, NULL) < 0)
-    {
-        return false;
-    }
-
-    //This will attempt to find a video stream in the input.
-    videoStream = -1;
-    for(unsigned int i = 0; i < pFormatCtx->nb_streams; i++)
-        if(pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
-            videoStream = i;
-    if(videoStream == -1)
-    {
-        DEBUG(INDI::Logger::DBG_SESSION, "Failed to get a video stream.");
-        return false;
-    }
-
-    //Find an appropriate decoder and then
-    // Allocate a pointer to the codec context for the video stream
-    pCodec = avcodec_find_decoder(pFormatCtx->streams[videoStream]->codecpar->codec_id);
-    pCodecCtx = avcodec_alloc_context3(pCodec);
-    avcodec_parameters_to_context(pCodecCtx, pFormatCtx->streams[videoStream]->codecpar);
-
-    //If an appropriate codec was not found, abort the connection
-    if(pCodec == nullptr)
-    {
-        DEBUG(INDI::Logger::DBG_SESSION, "Unsupported codec.");
-        return false;
-    }
-
-    //Attempt to open the codec.  If that fails, abort the connection.
-    if(avcodec_open2(pCodecCtx, pCodec, &optionsDict) < 0)
-    {
-        DEBUG(INDI::Logger::DBG_SESSION, "Failed to open codec.");
-        return false;
-    }
-
-    //Set the initial parameters for the CCD.
-    SetCCDParams(pCodecCtx->width, pCodecCtx->height, 8, pixelSize, pixelSize);
-
-    DEBUG(INDI::Logger::DBG_SESSION, "Connection Successful.");
-    return true;
-
-}
-#endif
 
 bool indi_qhy_v4l2::ConnectToSource(std::string device, std::string source, int, std::string, std::string,
                                     std::string)
@@ -933,7 +715,7 @@ bool indi_qhy_v4l2::initProperties()
     DEBUG(INDI::Logger::DBG_SESSION, "QHY CCD Driver initialized");
     
 #ifdef __linux__
-    // 定义增益和偏移量属性（仅 V4L2 模式）
+    // Gain and offset properties are available only for the V4L2 backend.
     IUFillNumber(&GainT[0], "GAIN", "Gain", "%.0f", 
                  static_cast<double>(v4l2_subdev_gain_min), 
                  static_cast<double>(v4l2_subdev_gain_max), 
@@ -1056,8 +838,7 @@ bool indi_qhy_v4l2::initProperties()
                      "Sensor Control", OPTIONS_TAB, IP_RW, 0, IPS_IDLE);
     defineProperty(&V4L2SubdevPathTP);
 
-    // V4L2_SUBDEV_EXPOSURE UI控件已移除，曝光时间由上位机通过 CCD_EXPOSURE 控制
-    // 内部变量 v4l2_subdev_exposure 仍然保留，由 syncV4L2ExposureFromDuration() 自动设置
+    // CCD_EXPOSURE is synchronized to the V4L2 subdevice internally.
 #endif
 
     FrameRates = new ISwitch[7];
@@ -1145,204 +926,6 @@ bool indi_qhy_v4l2::initProperties()
 
 // The direct backend exposes one capture-device selector. Actual video nodes
 // are enumerated as capture sources below.
-#if 0
-bool indi_qhy_v4l2::refreshInputDevices()
-{
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 0, 100)
-    AVInputFormat * d = nullptr;
-#else
-    const AVInputFormat * d = nullptr;
-#endif
-    int i = 0;
-    int numDevices = getNumOfInputDevices();
-#ifdef __linux__
-    CaptureDevices = new ISwitch[numDevices + 2];
-#else
-    CaptureDevices = new ISwitch[numDevices + 1];
-#endif
-    while ((d = av_input_video_device_next(d)))
-    {
-        if(!strcmp(d->name, videoDevice.c_str()))
-            IUFillSwitch(&CaptureDevices[i], d->name, d->name, ISS_ON);
-        else
-            IUFillSwitch(&CaptureDevices[i], d->name, d->name, ISS_OFF);
-        i++;
-    }
-    IUFillSwitch(&CaptureDevices[numDevices], "IP Camera", "IP Camera", ISS_OFF);
-#ifdef __linux__
-    IUFillSwitch(&CaptureDevices[numDevices + 1], QHY_V4L2_DIRECT_DEVICE, QHY_V4L2_DIRECT_DEVICE,
-                 (videoDevice == QHY_V4L2_DIRECT_DEVICE) ? ISS_ON : ISS_OFF);
-    IUFillSwitchVector(&CaptureDeviceSelection, CaptureDevices, numDevices + 2, getDeviceName(), "CAPTURE_DEVICE",
-                       "Capture Devices",
-                       CONNECTION_TAB, IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
-#else
-    IUFillSwitchVector(&CaptureDeviceSelection, CaptureDevices, numDevices + 1, getDeviceName(), "CAPTURE_DEVICE",
-                       "Capture Devices",
-                       CONNECTION_TAB, IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
-#endif
-    defineProperty(&CaptureDeviceSelection);
-
-    return true;
-}
-
-//This finds the number of devices available from FFMpeg
-//I had to write it because there doesn't seem to be a method available in the FFMpeg Libraries
-int indi_qhy_v4l2::getNumOfInputDevices()
-{
-    int i = 0;
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 0, 100)
-    AVInputFormat * d = nullptr;
-#else
-    const AVInputFormat * d = nullptr;
-#endif
-    while ((d = av_input_video_device_next(d)))
-    {
-        i++;
-    }
-    return i;
-}
-
-//This finds all the sources available from the selected device.
-//FFMpeg provides a way to get the sources using the list input sources method
-//But on OS X, AV Foundation is not supported in this list, so I wrote a method to get them.
-//There are also other cases of devices that are not supported, for them, I just load numbers for devices.
-bool indi_qhy_v4l2::refreshInputSources()
-{
-    if (CaptureSources)
-    {
-        delete[] CaptureSources;
-        CaptureSources = nullptr;
-        deleteProperty(CaptureSourceSelection.name);
-    }
-
-    int sourceNum = 0;
-    if(videoDevice == "avfoundation")
-    {
-        findAVFoundationVideoSources();
-        sourceNum = listOfSources.size();
-        CaptureSources = new ISwitch[sourceNum];
-        for(int x = 0; x < sourceNum; x++)
-        {
-            char num[16];
-            snprintf(num, 16, "%u", x);
-            if(x == 0)
-                IUFillSwitch(&CaptureSources[x], num, listOfSources.at(x).c_str(), ISS_ON);
-            else
-                IUFillSwitch(&CaptureSources[x], num, listOfSources.at(x).c_str(), ISS_OFF);
-        }
-    }
-    else if(videoDevice == "V4L2 Direct")
-    {
-        std::vector<std::string> v4l2_nodes;
-        DIR *dir = opendir("/dev");
-        if (dir)
-        {
-            struct dirent *entry = nullptr;
-            while ((entry = readdir(dir)) != nullptr)
-            {
-                if (strncmp(entry->d_name, "video", 5) == 0)
-                {
-                    std::string path = std::string("/dev/") + entry->d_name;
-                    v4l2_nodes.push_back(path);
-                }
-            }
-            closedir(dir);
-            std::sort(v4l2_nodes.begin(), v4l2_nodes.end());
-        }
-        sourceNum = v4l2_nodes.size();
-        CaptureSources = new ISwitch[sourceNum];
-        for (int x = 0; x < sourceNum; x++)
-        {
-            const char *label = v4l2_nodes[x].c_str();
-            if (videoSource == v4l2_nodes[x])
-                IUFillSwitch(&CaptureSources[x], label, label, ISS_ON);
-            else
-                IUFillSwitch(&CaptureSources[x], label, label, ISS_OFF);
-        }
-    }
-    else if(videoDevice == "IP Camera")
-    {
-        //No Source Buttons for IP Camera
-    }
-    else
-    {
-        int nbdev = 0;
-        struct AVDeviceInfoList *devlist = nullptr;
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 0, 100)
-        AVInputFormat *iformat = av_find_input_format(videoDevice.c_str());
-#else
-        const AVInputFormat *iformat = av_find_input_format(videoDevice.c_str());
-#endif
-        nbdev = avdevice_list_input_sources(iformat, nullptr, nullptr, &devlist);
-
-        //For this case the source list function is not implemented, we have to just list them by number
-        if ((nbdev < 0 ) || (devlist->nb_devices == 0))
-        {
-            avdevice_free_list_devices(&devlist);
-            sourceNum = 5;
-            CaptureSources = new ISwitch[sourceNum];
-            IUFillSwitch(&CaptureSources[0], "0", "0", ISS_ON);
-            for(int x = 1; x < sourceNum; x++)
-            {
-                char num[16];
-                snprintf(num, 16, "%u", x);
-                IUFillSwitch(&CaptureSources[x], num, num, ISS_OFF);
-            }
-        }
-        else
-        {
-            //For this case, we can use the names of the autodetected devices from FFMPEG
-            sourceNum = devlist->nb_devices;
-            CaptureSources = new ISwitch[sourceNum];
-            for(int x = 0; x < sourceNum; x++)
-            {
-                if(!strcmp(devlist->devices[x]->device_name, videoSource.c_str()))
-                    IUFillSwitch(&CaptureSources[x], devlist->devices[x]->device_name, devlist->devices[x]->device_name, ISS_ON);
-                else
-                    IUFillSwitch(&CaptureSources[x], devlist->devices[x]->device_name, devlist->devices[x]->device_name, ISS_OFF);
-            }
-            avdevice_free_list_devices(&devlist);
-        }
-    }
-
-    IUFillSwitchVector(&CaptureSourceSelection, CaptureSources, sourceNum, getDeviceName(), "CAPTURE_SOURCE", "Capture Sources",
-                       CONNECTION_TAB, IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
-
-
-    //This controls whether the Input Options controls or the IP Camera Options controls are visible
-
-    if (videoDevice == "IP Camera")
-    {
-        if(protocol != "CUSTOM")
-            defineProperty(&OnlineInputOptionsP);
-        defineProperty(&OnlineProtocolSelection);
-        defineProperty(&URLPathTP);
-
-        deleteProperty(CaptureSourceSelection.name);
-        deleteProperty(VideoSizeSelection.name);
-        deleteProperty(FrameRateSelection.name);
-        deleteProperty(PixelFormatSelection.name);
-        deleteProperty(InputOptionsTP.name);
-    }
-    else
-    {
-        defineProperty(&InputOptionsTP);
-        defineProperty(&CaptureSourceSelection);
-        defineProperty(&VideoSizeSelection);
-        defineProperty(&FrameRateSelection);
-        defineProperty(&PixelFormatSelection);
-
-        if(protocol != "CUSTOM")
-            deleteProperty(OnlineInputOptionsP.name);
-        deleteProperty(OnlineProtocolSelection.name);
-        deleteProperty(URLPathTP.name);
-    }
-
-    return true;
-}
-
-
-#endif
 
 bool indi_qhy_v4l2::refreshInputDevices()
 {
@@ -1441,12 +1024,12 @@ bool indi_qhy_v4l2::updateProperties()
     defineProperty(&DriverInfoTP);
     
 #ifdef __linux__
-    // 连接后发布增益和偏移量属性
+    // Publish gain and offset properties after connecting.
     if (isConnected())
     {
         if (use_v4l2_direct)
         {
-            // V4L2 模式：更新范围并发布属性
+            // Refresh the hardware ranges before publishing the properties.
             GainT[0].min = static_cast<double>(v4l2_subdev_gain_min);
             GainT[0].max = static_cast<double>(v4l2_subdev_gain_max);
             GainT[0].value = static_cast<double>(v4l2_subdev_gain);
@@ -1467,13 +1050,12 @@ bool indi_qhy_v4l2::updateProperties()
         }
         else
         {
-            // FFmpeg 模式：不发布属性
             DEBUG(INDI::Logger::DBG_SESSION, "Gain/Offset controls available only in V4L2 Direct mode");
         }
     }
     else
     {
-        // 断开连接时删除属性
+        // Remove hardware-dependent properties on disconnect.
         deleteProperty(GainTP.name);
         deleteProperty(OffsetTP.name);
     }
@@ -1511,12 +1093,9 @@ bool indi_qhy_v4l2::ISNewNumber (const char *dev, const char *name, double value
         return true;
     }
 
-    // V4L2_SUBDEV_EXPOSURE UI控件已移除
-    // 曝光时间现在完全由上位机通过 CCD_EXPOSURE 属性控制
-    // syncV4L2ExposureFromDuration() 会在 StartExposure() 中自动调用
+    // StartExposure() synchronizes CCD_EXPOSURE to the V4L2 subdevice.
 
 #ifdef __linux__
-    // 处理增益设置
     if (!strcmp(name, GainTP.name))
     {
         IUUpdateNumber(&GainTP, values, names, n);
@@ -1533,7 +1112,6 @@ bool indi_qhy_v4l2::ISNewNumber (const char *dev, const char *name, double value
         return true;
     }
     
-    // 处理偏移量设置
     if (!strcmp(name, OffsetTP.name))
     {
         IUUpdateNumber(&OffsetTP, values, names, n);
@@ -1988,7 +1566,7 @@ bool indi_qhy_v4l2::StartExposure(float duration)
     // For V4L2 direct sources, start stream once at the beginning of exposure
     if (use_v4l2_direct)
     {
-        // 关键步骤：确保所有缓冲在每次开启流前都已 QBUF
+        // Queue every buffer before each STREAMON operation.
         requeueAllV4L2Buffers();
         DEBUGF(INDI::Logger::DBG_SESSION, "StartExposure: v4l2_streaming flag is %s, v4l2_fd=%d", 
                v4l2_streaming ? "true" : "false", v4l2_fd);
@@ -2053,15 +1631,6 @@ bool indi_qhy_v4l2::StartExposure(float duration)
         // Don't reset gotAnImageAlready here - let TimerHit handle it
     }
 
-    /*
-    int ret = avformat_flush(pFormatCtx);
-    if(ret != 0 )
-    {
-        char errbuff[200];
-        av_make_error_string(errbuff, 200, ret);
-        DEBUGF(INDI::Logger::DBG_SESSION, "FFMPEG Issue in flushing buffer: %d, %s.", ret, errbuff);
-    }
-    */
 
     //This sets up the exposure time settings
     ExposureRequest = duration;
@@ -2100,7 +1669,7 @@ bool indi_qhy_v4l2::AbortExposure()
 }
 
 /**************************************************************************************
-** INDI 增益控制接口
+** INDI gain control
 ***************************************************************************************/
 bool indi_qhy_v4l2::SetCCDGain(double gain)
 {
@@ -2116,13 +1685,12 @@ bool indi_qhy_v4l2::SetCCDGain(double gain)
         return false;
     }
 #endif
-    // FFmpeg 模式不支持增益控制
     DEBUG(INDI::Logger::DBG_WARNING, "Gain control only available in V4L2 Direct mode");
     return false;
 }
 
 /**************************************************************************************
-** INDI 偏移量控制接口
+** INDI offset control
 ***************************************************************************************/
 bool indi_qhy_v4l2::SetCCDOffset(double offset)
 {
@@ -2138,7 +1706,6 @@ bool indi_qhy_v4l2::SetCCDOffset(double offset)
         return false;
     }
 #endif
-    // FFmpeg 模式不支持偏移量控制
     DEBUG(INDI::Logger::DBG_WARNING, "Offset control only available in V4L2 Direct mode");
     return false;
 }
@@ -2617,72 +2184,6 @@ void indi_qhy_v4l2::run_capture()
     }
 
     // No non-V4L2 capture backend is supported.
-#if 0
-    //This sets up the output format for the exposures
-    if(outputFormat == "16 bit RGB")
-    {
-        LOG_INFO("Note, RGB 16 bit not supported in video stream using 8 Bit RGB instead.");
-        out_pix_fmt = AV_PIX_FMT_RGB24;
-        PrimaryCCD.setBPP(8);
-        PrimaryCCD.setNAxis(3);
-        Streamer->setPixelFormat(INDI_RGB);
-    }
-    else if(outputFormat == "8 bit RGB")
-    {
-        out_pix_fmt = AV_PIX_FMT_RGB24;
-        PrimaryCCD.setBPP(8);
-        PrimaryCCD.setNAxis(3);
-        Streamer->setPixelFormat(INDI_RGB);
-    }
-    else if(outputFormat == "16 bit Grayscale")
-    {
-        LOG_INFO("Note, 16 bit Grayscale not supported in video stream using 8 Bit Grayscale instead.");
-        out_pix_fmt = AV_PIX_FMT_GRAY8;
-        PrimaryCCD.setBPP(8);
-        PrimaryCCD.setNAxis(2);
-        Streamer->setPixelFormat(INDI_MONO);
-    }
-    else
-        return;
-
-    if(!setupStreaming())
-        return;
-
-    int w = pCodecCtx->width;
-    int h = pCodecCtx->height;
-    Streamer->setSize(w, h);
-    PrimaryCCD.setFrame(0, 0, w, h);
-
-    //This will clear the frame button before streaming is started so that the frames are all current.
-    if(!flush_frame_buffer())
-        DEBUG(INDI::Logger::DBG_SESSION, "FFMPEG Issue in flushing buffer");
-
-    /*
-    int ret = avformat_flush(pFormatCtx);
-    if(ret != 0 )
-    {
-        char errbuff[200];
-        av_make_error_string(errbuff, 200, ret);
-        DEBUGF(INDI::Logger::DBG_SESSION, "FFMPEG Issue in flushing buffer: %d, %s.", ret, errbuff);
-    }
-    */
-
-    while (is_capturing && is_streaming)
-    {
-
-        if(getStreamFrame())
-            Streamer->newFrame(pFrameOUT->data[0], numBytes);
-        else
-        {
-            is_capturing = false;
-            is_streaming = false;
-        }
-    }
-
-    freeMemory();
-
-    DEBUG(INDI::Logger::DBG_SESSION, "Capture thread releasing device.");
-#endif
 }
 
 //This converts an image from INDI_RGB to FITS_RGB so the FITSViewer can read it.
@@ -2723,62 +2224,6 @@ bool indi_qhy_v4l2::convertINDI_RGBtoFITS_RGB(uint8_t *originalImage, uint8_t *c
 
 //This sets up the V4L2 CCD to get images
 //It is used for both the streaming and exposing algorithms
-#if 0
-bool indi_qhy_v4l2::setupStreaming()
-{
-    if (use_v4l2_direct)
-    {
-        return setupV4L2Streaming();
-    }
-    // Determine required buffer size and allocate buffer for pframeRGB
-    numBytes = av_image_get_buffer_size(out_pix_fmt, pCodecCtx->width, pCodecCtx->height, 1);
-
-    // Allocate video frame
-    pFrame = av_frame_alloc();
-    if(pFrame == nullptr)
-        return false;
-    // Allocate an AVFrame structure
-    pFrameOUT = av_frame_alloc();
-    if(pFrameOUT == nullptr)
-        return false;
-
-    // Assign appropriate parts of buffer to image planes in pFrameRGB
-    buffer = (uint8_t *)av_malloc(numBytes * sizeof(uint8_t));
-    if(buffer == nullptr)
-        return false;
-
-    av_image_fill_arrays (pFrameOUT->data, pFrameOUT->linesize, buffer, out_pix_fmt,
-                          pCodecCtx->width, pCodecCtx->height, 1);
-
-    // initialize SWS context for software scaling
-    sws_ctx = sws_getContext( pCodecCtx->width, pCodecCtx->height,
-                              pCodecCtx->pix_fmt, pCodecCtx->width, pCodecCtx->height,
-                              out_pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr
-                            );
-    if(sws_ctx == nullptr)
-        return false;
-
-    updateVideoAdjustments();
-
-    PrimaryCCD.setFrameBufferSize(numBytes);
-    PrimaryCCD.setResolution(pCodecCtx->width, pCodecCtx->height);
-
-    return true;
-}
-
-void indi_qhy_v4l2::updateVideoAdjustments()
-{
-    if(sws_ctx == nullptr)
-        return;
-
-    int src_range = 1, dst_range = 1; //These are just flags 1 for Jpeg and 2 for Mpeg
-    const int* coefs = sws_getCoefficients(SWS_CS_DEFAULT);
-    //Note these last 3 values are reported in 16.16 fixed point format
-    sws_setColorspaceDetails(sws_ctx, coefs, src_range, coefs, dst_range,
-                             (int)(brightness * 65536), (int)(contrast * 65536), (int)(saturation * 65536));
-}
-
-#endif
 
 bool indi_qhy_v4l2::setupStreaming()
 {
@@ -2787,92 +2232,6 @@ bool indi_qhy_v4l2::setupStreaming()
 
 //This gets one image from the camera.
 //It is used for both the streaming and exposing algorithms
-#if 0
-bool indi_qhy_v4l2::getStreamFrame()
-{
-    if (use_v4l2_direct)
-        return getStreamFrameV4L2();
-    AVPacket packet;
-    //If at first you don't succees to get a frame, try again.
-    int ret = -1;
-    while(ret < 0)
-    {
-        int tries = 0;
-        while(tries < 10) //Try a maximum of 10 times before trying to reconnect the source
-        {
-            ret = av_read_frame(pFormatCtx, &packet);
-            if(ret == 0)
-                break;
-            else
-            {
-                if(ret != -35) // Don't display "Resource Temporarily Unavailable"
-                {
-                    char errbuff[200];
-                    av_make_error_string(errbuff, 200, ret);
-                    DEBUGF(INDI::Logger::DBG_SESSION, "FFMPEG Error: %d, %s.", ret, errbuff);
-                }
-                tries++;
-                usleep(bufferTimeout); //give it a moment, if it is unavailable
-            }
-        }
-        if(ret < 0) // If it still is not working after 10 tries, we should try reconnecting the source.
-        {
-            if(reconnectSource())
-            {
-                DEBUG(INDI::Logger::DBG_SESSION, "Device successfully reconnected.");
-                freeMemory();
-                //Try to set up streaming again, if there is an error, return
-                if(!setupStreaming())
-                {
-                    DEBUG(INDI::Logger::DBG_SESSION, "Error on Stream Setup.");
-                    return false;
-                }
-            }
-            else
-            {
-                DEBUG(INDI::Logger::DBG_SESSION, "Device did not reconnect after 10 tries.");
-                av_packet_unref(&packet);
-                return false;
-            }
-        }
-    }
-    if(packet.stream_index == videoStream)
-    {
-        int ret;
-        ret = avcodec_send_packet(pCodecCtx, &packet);
-        char errbuff[200];
-        av_make_error_string(errbuff, 200, ret);
-        if (ret < 0)
-        {
-            DEBUGF(INDI::Logger::DBG_SESSION, "Error sending a packet for decoding:%s", errbuff);
-            av_packet_unref(&packet);
-            return false;
-        }
-        while (ret >= 0)
-        {
-            ret = avcodec_receive_frame(pCodecCtx, pFrame);
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-                continue;
-            else if (ret < 0)
-            {
-                DEBUG(INDI::Logger::DBG_SESSION, "Error during decoding");
-                av_packet_unref(&packet);
-                return false;
-            }
-            // We have a frame at that point
-            // Convert the image from its native format to our output format
-            sws_scale(sws_ctx, (uint8_t const * const *)pFrame->data,
-                      pFrame->linesize, 0, pCodecCtx->height,
-                      pFrameOUT->data, pFrameOUT->linesize);
-            av_packet_unref(&packet);
-            return true;
-        }
-
-    }
-    return false;
-}
-
-#endif
 
 bool indi_qhy_v4l2::getStreamFrame()
 {
@@ -2881,38 +2240,6 @@ bool indi_qhy_v4l2::getStreamFrame()
 
 //This will clear out the frame buffer of any unread frames.
 //That way we are sure to get the latest frames when exposing
-#if 0
- bool indi_qhy_v4l2::flush_frame_buffer()
- {
-     if (use_v4l2_direct)
-         return flush_frame_bufferV4L2();
-     int packetReceiveTime = -1;
-     int num = 0;
-     while(packetReceiveTime < bufferTimeout)
-     {
-         num++;
-         struct timeval then;
-         gettimeofday(&then, nullptr);
-         AVPacket packet;
-         int ret = av_read_frame(pFormatCtx, &packet);
-         if(ret != 0) // Return value less than 0 means error
-         {
-             if(ret == -35) //Leave the loop since the device is not available to give frames.
-                 break;
-             char errbuff[200];
-             av_make_error_string(errbuff, 200, ret);
-             DEBUGF(INDI::Logger::DBG_SESSION, "FFMPEG Error while clearing buffer: %s.", errbuff);
-         }
-         struct timeval now;
-         gettimeofday(&now, nullptr);
-         packetReceiveTime = now.tv_usec - then.tv_usec;
-         av_packet_unref(&packet);
-     }
-     DEBUGF(INDI::Logger::DBG_SESSION, "Buffer Cleared of %u stale frames.", num);
-     return true;  //Buffer Cleared
- }
-
-#endif
 
 bool indi_qhy_v4l2::flush_frame_buffer()
 {
@@ -3194,7 +2521,6 @@ bool indi_qhy_v4l2::ConnectToSourceV4L2(std::string source)
         updateV4L2SubdevExposureRange();
         setV4L2Exposure(v4l2_subdev_exposure);
         
-        // 初始化增益和偏移量
         updateV4L2GainRange();
         getV4L2Gain(&v4l2_subdev_gain);
         updateV4L2OffsetRange();
@@ -3222,7 +2548,7 @@ bool indi_qhy_v4l2::DisconnectV4L2()
     }
     closeV4L2Subdevice();
     use_v4l2_direct = false;
-    //目前实现参数在断开重连时保留，如果需要重置参数，可以取消注释以下代码，同时也可以修改默认参数
+    // Parameters intentionally persist across reconnects. Uncomment this block to restore defaults.
     // v4l2_subdev_exposure = 10000.0;
     // v4l2_subdev_gain = 64;
     // v4l2_subdev_offset = 0;
@@ -3411,7 +2737,7 @@ bool indi_qhy_v4l2::getStreamFrameV4L2()
     {
         if (v4l2_force_16bit)
         {
-            // 透传16位容器，但按 bytesperline 行拷贝，避免 stride 造成的错位
+            // Preserve the 16-bit container and copy by bytesperline to account for stride.
             size_t expected = (size_t)w * h * 2;
             uint32_t src_bpl = 0;
             if (!v4l2_is_mplane)
@@ -4005,7 +3331,6 @@ void indi_qhy_v4l2::updateV4L2SubdevExposureRange()
 
     if (ioctl(v4l2_subdev_fd, VIDIOC_QUERYCTRL, &query) == 0)
     {
-        // 更新成员变量存储的曝光范围
         v4l2_subdev_exposure_min = query.minimum;
         v4l2_subdev_exposure_max = query.maximum;
 
@@ -4015,7 +3340,6 @@ void indi_qhy_v4l2::updateV4L2SubdevExposureRange()
         PrimaryCCD.setMinMaxStep("CCD_EXPOSURE", "CCD_EXPOSURE_VALUE",
                                  minSeconds, maxSeconds, stepSeconds, false);
 
-        // 确保当前曝光值在有效范围内
         if (v4l2_subdev_exposure < v4l2_subdev_exposure_min)
             v4l2_subdev_exposure = v4l2_subdev_exposure_min;
         if (v4l2_subdev_exposure > v4l2_subdev_exposure_max)
@@ -4031,7 +3355,7 @@ void indi_qhy_v4l2::updateV4L2SubdevExposureRange()
 #endif
 }
 
-void indi_qhy_v4l2::syncV4L2ExposureFromDuration(double duration) //根据上位机传过来的曝光时间和设备最大曝光时间来设置
+void indi_qhy_v4l2::syncV4L2ExposureFromDuration(double duration)
 {
 #ifdef __linux__
     if (!use_v4l2_direct)
@@ -4040,7 +3364,7 @@ void indi_qhy_v4l2::syncV4L2ExposureFromDuration(double duration) //根据上位
     if (duration <= 0)
         duration = std::max(0.0001, v4l2_subdev_exposure_min / 10000.0);
 
-    // 使用成员变量存储的曝光范围（从 updateV4L2SubdevExposureRange 中查询得到）
+    // The exposure range is queried from the subdevice by updateV4L2SubdevExposureRange().
     double minValue = v4l2_subdev_exposure_min;
     double maxValue = v4l2_subdev_exposure_max;
 
@@ -4048,20 +3372,18 @@ void indi_qhy_v4l2::syncV4L2ExposureFromDuration(double duration) //根据上位
     double exposure100us = duration * 10000.0;
     int32_t target = static_cast<int32_t>(std::round(exposure100us));
 
-    // 限制在设备支持的范围内
     if (target < static_cast<int32_t>(minValue))
         target = static_cast<int32_t>(minValue);
     if (target > static_cast<int32_t>(maxValue))
         target = static_cast<int32_t>(maxValue);
 
-    // 设置 V4L2 子设备曝光
     if (!setV4L2Exposure(target))
     {
         DEBUGF(INDI::Logger::DBG_SESSION, "Failed to auto-sync V4L2 exposure for duration %.3f s", duration);
     }
     else
     {
-        v4l2_subdev_exposure = target;  // 更新内部变量
+        v4l2_subdev_exposure = target;
         DEBUGF(INDI::Logger::DBG_SESSION,
                "Auto-synced V4L2 absolute exposure to %d (100us units) for duration %.3f s (range: %.0f-%.0f)",
                target, duration, minValue, maxValue);
@@ -4136,7 +3458,7 @@ bool indi_qhy_v4l2::requeueAllV4L2Buffers()
         }
         if (errno == EBUSY)
         {
-            // 已在队列中，无需重复入队
+            // The buffer is already queued.
             busy++;
             continue;
         }
@@ -4144,7 +3466,7 @@ bool indi_qhy_v4l2::requeueAllV4L2Buffers()
     }
     DEBUGF(INDI::Logger::DBG_SESSION, "Re-queued V4L2 buffers: success=%u, busy=%u, total=%u",
            success, busy, v4l2_buffer_count);
-    // 只要没有致命错误，返回 true
+    // Non-fatal dequeue errors do not invalidate the stream.
     return true;
 #else
     return true;
@@ -4171,10 +3493,9 @@ bool indi_qhy_v4l2::saveConfigItems(FILE *fp)
 }
 
 /**************************************************************************************
-** V4L2 增益和偏移量控制函数
+** V4L2 gain and offset controls
 ***************************************************************************************/
 
-// 更新增益范围（从子设备查询）
 void indi_qhy_v4l2::updateV4L2GainRange()
 {
 #ifdef __linux__
@@ -4189,7 +3510,6 @@ void indi_qhy_v4l2::updateV4L2GainRange()
         v4l2_subdev_gain_min = query.minimum;
         v4l2_subdev_gain_max = query.maximum;
 
-        // 确保当前增益值在有效范围内
         if (v4l2_subdev_gain < v4l2_subdev_gain_min)
             v4l2_subdev_gain = v4l2_subdev_gain_min;
         if (v4l2_subdev_gain > v4l2_subdev_gain_max)
@@ -4205,7 +3525,6 @@ void indi_qhy_v4l2::updateV4L2GainRange()
 #endif
 }
 
-// 设置模拟增益
 bool indi_qhy_v4l2::setV4L2Gain(int32_t gain)
 {
 #ifdef __linux__
@@ -4215,7 +3534,6 @@ bool indi_qhy_v4l2::setV4L2Gain(int32_t gain)
         return false;
     }
 
-    // 限制在有效范围内
     if (gain < v4l2_subdev_gain_min)
         gain = v4l2_subdev_gain_min;
     if (gain > v4l2_subdev_gain_max)
@@ -4240,7 +3558,6 @@ bool indi_qhy_v4l2::setV4L2Gain(int32_t gain)
 #endif
 }
 
-// 获取当前增益值
 bool indi_qhy_v4l2::getV4L2Gain(int32_t *gain)
 {
 #ifdef __linux__
@@ -4304,7 +3621,7 @@ void indi_qhy_v4l2::updateV4L2OffsetRange()
 #endif
 }
 
-// 设置偏移量（通过标准 V4L2 black-level 控件）
+// Set the offset through the standard V4L2 black-level control.
 bool indi_qhy_v4l2::setV4L2Offset(int32_t offset)
 {
 #ifdef __linux__
@@ -4335,7 +3652,6 @@ bool indi_qhy_v4l2::setV4L2Offset(int32_t offset)
 #endif
 }
 
-// 获取当前偏移量
 bool indi_qhy_v4l2::getV4L2Offset(int32_t *offset)
 {
 #ifdef __linux__
