@@ -56,6 +56,23 @@ How to Use
 
         Share the test result output in INDI & QHY forums. Be as thorough as possible with your environment conditions (OS, architecture..etc)
 	 
+V4L2 Direct Backend (Linux)
+---------------------------
+
+The QHY V4L2 backend is intended for QHY camera pipelines exposed by a Linux
+media-controller graph. A camera is instantiated only when its sensor device-tree
+node explicitly provides `qhy,indi-name`. The optional `qhy,indi-role` property
+is used only to append a display role such as `Main` or `Guide`.
+
+The backend requires a complete sensor-to-capture media pipeline with both a
+capture `/dev/video*` node and a sensor `/dev/v4l-subdev*` node. It uses standard
+V4L2 controls where available for exposure, analogue gain, and black level.
+
+Supported raw input is unpacked 8/10/12/14/16-bit Bayer or monochrome data stored
+in a 16-bit container. Packed raw formats are currently rejected rather than
+silently producing a corrupted image. The backend does not configure vendor or
+board-specific sysfs controls.
+
 Nicknames
 ---------
 
